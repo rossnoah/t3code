@@ -17,16 +17,37 @@ function stripInlineComment(line: string): string {
 }
 
 function splitDirectiveArgs(value: string): ReadonlyArray<string> {
+  // ssh_config tokens are separated by whitespace or `=`; double quotes group
+  // a token that contains separators (e.g. `User "svc user"`).
   const args: Array<string> = [];
-  for (const rawEntry of value
-    .replace(/=(?!=)/gu, " ")
-    .trim()
-    .split(/\s+/u)) {
-    const entry = rawEntry.trim();
-    if (entry.length > 0) {
-      args.push(entry);
+  let current = "";
+  let inQuotes = false;
+  const flush = () => {
+    if (current.length > 0) {
+      args.push(current);
     }
+    current = "";
+  };
+  for (const char of value) {
+    if (inQuotes) {
+      if (char === '"') {
+        inQuotes = false;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (char === " " || char === "\t" || char === "=") {
+      flush();
+      continue;
+    }
+    current += char;
   }
+  flush();
   return args;
 }
 
@@ -89,24 +110,56 @@ const expandGlob = Effect.fnUntraced(function* (pattern: string) {
   return matchedPaths.toSorted((left, right) => left.localeCompare(right));
 });
 
-export const collectSshConfigAliasesFromFile = Effect.fnUntraced(function* (
+interface SshConfigHostValues {
+  hostname?: string;
+  username?: string;
+  port?: number;
+}
+
+/**
+ * One `Host` (or unconditional `Match all`) section of an ssh config, in the
+ * order it was encountered across the root file and every spliced `Include`.
+ */
+export interface SshConfigHostBlock {
+  readonly patterns: ReadonlyArray<string>;
+  readonly values: SshConfigHostValues;
+}
+
+interface SshConfigParseState {
+  readonly blocks: Array<SshConfigHostBlock>;
+  current: SshConfigHostBlock | null;
+  readonly visited: Set<string>;
+}
+
+function makeSshConfigParseState(): SshConfigParseState {
+  // Directives that appear before the first Host/Match section apply to every
+  // host, and, per ssh_config first-obtained-value semantics, win over later
+  // sections — modeled as an implicit leading `Host *` block.
+  const globalBlock: SshConfigHostBlock = { patterns: ["*"], values: {} };
+  return { blocks: [globalBlock], current: globalBlock, visited: new Set<string>() };
+}
+
+function parseSshPort(raw: string): number | undefined {
+  if (!/^\d+$/u.test(raw)) {
+    return undefined;
+  }
+  const port = Number.parseInt(raw, 10);
+  return port >= 1 && port <= 65535 ? port : undefined;
+}
+
+const parseSshConfigFile = Effect.fnUntraced(function* (
   filePath: string,
-  visited = new Set<string>(),
+  state: SshConfigParseState,
   homeDir: string,
-): Effect.fn.Return<
-  ReadonlyArray<string>,
-  PlatformError.PlatformError,
-  FileSystem.FileSystem | Path.Path
-> {
+): Effect.fn.Return<void, PlatformError.PlatformError, FileSystem.FileSystem | Path.Path> {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const resolvedPath = path.resolve(filePath);
-  if (visited.has(resolvedPath) || !(yield* fs.exists(resolvedPath))) {
-    return NO_HOSTS;
+  if (state.visited.has(resolvedPath) || !(yield* fs.exists(resolvedPath))) {
+    return;
   }
-  visited.add(resolvedPath);
+  state.visited.add(resolvedPath);
 
-  const aliases = new Set<string>();
   const directory = path.dirname(resolvedPath);
   const raw = yield* fs.readFileString(resolvedPath);
 
@@ -117,43 +170,142 @@ export const collectSshConfigAliasesFromFile = Effect.fnUntraced(function* (
     }
 
     const [directive = "", ...rawArgs] = splitDirectiveArgs(stripped);
-    const normalizedDirective = directive.toLowerCase();
-    if (normalizedDirective === "include") {
-      for (const includePattern of rawArgs) {
-        const resolvedPattern = yield* resolveSshConfigIncludePattern(
-          includePattern,
-          directory,
-          homeDir,
-        );
-        const includedPaths = yield* expandGlob(resolvedPattern);
-        for (const includedPath of includedPaths) {
-          const includedAliases = yield* collectSshConfigAliasesFromFile(
-            includedPath,
-            visited,
+    switch (directive.toLowerCase()) {
+      case "include": {
+        // Included lines splice into the current section, so parsing shares
+        // one state across files and `state.current` carries over.
+        for (const includePattern of rawArgs) {
+          const resolvedPattern = yield* resolveSshConfigIncludePattern(
+            includePattern,
+            directory,
             homeDir,
           );
-          for (const alias of includedAliases) {
-            aliases.add(alias);
+          for (const includedPath of yield* expandGlob(resolvedPattern)) {
+            yield* parseSshConfigFile(includedPath, state, homeDir);
           }
         }
+        break;
       }
-      continue;
-    }
-
-    if (normalizedDirective !== "host") {
-      continue;
-    }
-
-    for (const alias of rawArgs) {
-      if (alias.length === 0 || hasSshPattern(alias)) {
-        continue;
+      case "host": {
+        const block: SshConfigHostBlock = { patterns: rawArgs, values: {} };
+        state.blocks.push(block);
+        state.current = block;
+        break;
       }
-      aliases.add(alias);
+      case "match": {
+        // `Match all` is unconditional; every other Match criterion depends
+        // on runtime state we cannot evaluate, so its section is skipped.
+        if (rawArgs.length > 0 && rawArgs.every((entry) => entry.toLowerCase() === "all")) {
+          const block: SshConfigHostBlock = { patterns: ["*"], values: {} };
+          state.blocks.push(block);
+          state.current = block;
+        } else {
+          state.current = null;
+        }
+        break;
+      }
+      case "hostname": {
+        const [value] = rawArgs;
+        if (state.current !== null && value !== undefined) {
+          state.current.values.hostname ??= value;
+        }
+        break;
+      }
+      case "user": {
+        const [value] = rawArgs;
+        if (state.current !== null && value !== undefined) {
+          state.current.values.username ??= value;
+        }
+        break;
+      }
+      case "port": {
+        const [value] = rawArgs;
+        if (state.current !== null && value !== undefined) {
+          const port = parseSshPort(value);
+          if (port !== undefined) {
+            state.current.values.port ??= port;
+          }
+        }
+        break;
+      }
+      default:
+        break;
     }
   }
-
-  return [...aliases].toSorted((left, right) => left.localeCompare(right));
 });
+
+function matchesSshHostPattern(host: string, pattern: string): boolean {
+  return globToRegExp(pattern.toLowerCase()).test(host.toLowerCase());
+}
+
+function blockAppliesToHost(host: string, patterns: ReadonlyArray<string>): boolean {
+  let matched = false;
+  for (const pattern of patterns) {
+    if (pattern.startsWith("!")) {
+      if (pattern.length > 1 && matchesSshHostPattern(host, pattern.slice(1))) {
+        return false;
+      }
+      continue;
+    }
+    if (!matched && matchesSshHostPattern(host, pattern)) {
+      matched = true;
+    }
+  }
+  return matched;
+}
+
+function expandSshHostnameTokens(value: string, host: string): string {
+  return value.replace(/%[%h]/gu, (token) => (token === "%%" ? "%" : host));
+}
+
+export function resolveSshConfigHost(
+  host: string,
+  blocks: ReadonlyArray<SshConfigHostBlock>,
+): Pick<DesktopDiscoveredSshHost, "hostname" | "username" | "port"> {
+  let hostname: string | undefined;
+  let username: string | undefined;
+  let port: number | undefined;
+  for (const block of blocks) {
+    if (!blockAppliesToHost(host, block.patterns)) {
+      continue;
+    }
+    hostname ??= block.values.hostname;
+    username ??= block.values.username;
+    port ??= block.values.port;
+  }
+  return {
+    hostname: hostname === undefined ? host : expandSshHostnameTokens(hostname, host),
+    username: username ?? null,
+    port: port ?? null,
+  };
+}
+
+export const collectSshConfigHostBlocks = Effect.fnUntraced(function* (
+  filePath: string,
+  homeDir: string,
+): Effect.fn.Return<
+  ReadonlyArray<SshConfigHostBlock>,
+  PlatformError.PlatformError,
+  FileSystem.FileSystem | Path.Path
+> {
+  const state = makeSshConfigParseState();
+  yield* parseSshConfigFile(filePath, state, homeDir);
+  return state.blocks;
+});
+
+function collectConcreteHostAliases(
+  blocks: ReadonlyArray<SshConfigHostBlock>,
+): ReadonlyArray<string> {
+  const aliases = new Set<string>();
+  for (const block of blocks) {
+    for (const pattern of block.patterns) {
+      if (!hasSshPattern(pattern)) {
+        aliases.add(pattern);
+      }
+    }
+  }
+  return [...aliases].toSorted((left, right) => left.localeCompare(right));
+}
 
 function normalizeKnownHostsHostname(rawHost: string): string {
   const bracketMatch = /^\[([^\]]+)\]:(\d+)$/u.exec(rawHost);
@@ -224,20 +376,15 @@ export const discoverSshHosts = Effect.fnUntraced(
     }
 
     const sshDirectory = path.join(homeDir, ".ssh");
-    const configAliases = yield* collectSshConfigAliasesFromFile(
-      path.join(sshDirectory, "config"),
-      new Set<string>(),
-      homeDir,
-    );
+    const blocks = yield* collectSshConfigHostBlocks(path.join(sshDirectory, "config"), homeDir);
+    const configAliases = collectConcreteHostAliases(blocks);
     const knownHosts = yield* readKnownHostsHostnames(path.join(sshDirectory, "known_hosts"));
     const discovered = new Map<string, DesktopDiscoveredSshHost>();
 
     for (const alias of configAliases) {
       discovered.set(alias, {
         alias,
-        hostname: alias,
-        username: null,
-        port: null,
+        ...resolveSshConfigHost(alias, blocks),
         source: "ssh-config",
       });
     }
@@ -246,17 +393,23 @@ export const discoverSshHosts = Effect.fnUntraced(
       if (discovered.has(hostname)) {
         continue;
       }
+      // Wildcard Host sections (e.g. `Host *`) still apply to hosts that are
+      // only present in known_hosts, exactly as ssh itself would resolve them.
       discovered.set(hostname, {
         alias: hostname,
-        hostname,
-        username: null,
-        port: null,
+        ...resolveSshConfigHost(hostname, blocks),
         source: "known-hosts",
       });
     }
 
+    // Named ssh-config hosts are what users reach for; raw known_hosts
+    // entries (mostly bare IPs) sort after them.
     return [...discovered.values()].toSorted((left, right) =>
-      left.alias.localeCompare(right.alias),
+      left.source === right.source
+        ? left.alias.localeCompare(right.alias)
+        : left.source === "ssh-config"
+          ? -1
+          : 1,
     );
   },
   Effect.mapError(

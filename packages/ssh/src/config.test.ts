@@ -17,56 +17,50 @@ function makeTempHomeDir() {
   });
 }
 
+const writeSshFile = (relativePath: string, lines: ReadonlyArray<string>, homeDir: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const filePath = path.join(homeDir, ".ssh", relativePath);
+    yield* fs.makeDirectory(path.dirname(filePath), { recursive: true });
+    yield* fs.writeFileString(filePath, [...lines, ""].join("\n"));
+  });
+
 describe("ssh config", () => {
   it.effect("discovers ssh config hosts across included files", () =>
     Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
       const homeDir = yield* makeTempHomeDir();
-      const sshDir = path.join(homeDir, ".ssh");
-      yield* fs.makeDirectory(path.join(sshDir, "config.d"), { recursive: true });
-      yield* fs.writeFileString(
-        path.join(sshDir, "config"),
+      yield* writeSshFile(
+        "config",
         [
           "Host devbox",
           "  HostName devbox.example.com",
           "Host=equalsbox",
           "Include=config.d/*.conf",
-          "",
-        ].join("\n"),
+        ],
+        homeDir,
       );
-      yield* fs.writeFileString(
-        path.join(sshDir, "config.d", "team.conf"),
-        [
-          "Host staging",
-          "  HostName staging.example.com",
-          "Host *",
-          "  ServerAliveInterval 30",
-          "",
-        ].join("\n"),
+      yield* writeSshFile(
+        "config.d/team.conf",
+        ["Host staging", "  HostName staging.example.com", "Host *", "  ServerAliveInterval 30"],
+        homeDir,
       );
-      yield* fs.writeFileString(
-        path.join(sshDir, "known_hosts"),
+      yield* writeSshFile(
+        "known_hosts",
         [
           "known.example.com ssh-ed25519 AAAA",
           "|1|hashed|entry ssh-ed25519 AAAA",
           "[bastion.example.com]:2222 ssh-ed25519 AAAA",
-          "",
-        ].join("\n"),
+        ],
+        homeDir,
       );
 
       const hosts = yield* discoverSshHosts({ homeDir });
+      // ssh-config hosts list before known_hosts entries.
       assert.deepEqual(hosts, [
         {
-          alias: "bastion.example.com",
-          hostname: "bastion.example.com",
-          username: null,
-          port: null,
-          source: "known-hosts",
-        },
-        {
           alias: "devbox",
-          hostname: "devbox",
+          hostname: "devbox.example.com",
           username: null,
           port: null,
           source: "ssh-config",
@@ -79,17 +73,157 @@ describe("ssh config", () => {
           source: "ssh-config",
         },
         {
+          alias: "staging",
+          hostname: "staging.example.com",
+          username: null,
+          port: null,
+          source: "ssh-config",
+        },
+        {
+          alias: "bastion.example.com",
+          hostname: "bastion.example.com",
+          username: null,
+          port: null,
+          source: "known-hosts",
+        },
+        {
           alias: "known.example.com",
           hostname: "known.example.com",
           username: null,
           port: null,
           source: "known-hosts",
         },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("resolves hostname, user, and port with first-obtained-value semantics", () =>
+    Effect.gen(function* () {
+      const homeDir = yield* makeTempHomeDir();
+      yield* writeSshFile(
+        "config",
+        [
+          "Host *.internal !secret.internal",
+          "  User deploy",
+          "  Port 2222",
+          "Host web1.internal",
+          "  HostName 10.0.0.5",
+          "  Port 2200 # first obtained value (2222) must win",
+          "Host secret.internal",
+          "  HostName vault.example.com",
+          "Host quoted",
+          '  HostName "quoted.example.com"',
+          '  User "svc user"',
+          "Host *",
+          "  User fallback",
+        ],
+        homeDir,
+      );
+
+      const hosts = yield* discoverSshHosts({ homeDir });
+      assert.deepEqual(hosts, [
         {
-          alias: "staging",
-          hostname: "staging",
-          username: null,
+          alias: "quoted",
+          hostname: "quoted.example.com",
+          username: "svc user",
           port: null,
+          source: "ssh-config",
+        },
+        {
+          alias: "secret.internal",
+          hostname: "vault.example.com",
+          username: "fallback",
+          port: null,
+          source: "ssh-config",
+        },
+        {
+          alias: "web1.internal",
+          hostname: "10.0.0.5",
+          username: "deploy",
+          port: 2222,
+          source: "ssh-config",
+        },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("applies global directives, Match sections, and %h expansion", () =>
+    Effect.gen(function* () {
+      const homeDir = yield* makeTempHomeDir();
+      yield* writeSshFile(
+        "config",
+        [
+          "Port 2022",
+          "Host devbox",
+          "  HostName %h.example.com",
+          "  Port 22",
+          "Match host ignored",
+          "  User leaked",
+          "Match all",
+          "  User everyone",
+          "Host devbox2",
+          "  Port not-a-port",
+        ],
+        homeDir,
+      );
+
+      const hosts = yield* discoverSshHosts({ homeDir });
+      assert.deepEqual(hosts, [
+        {
+          alias: "devbox",
+          hostname: "devbox.example.com",
+          username: "everyone",
+          // The pre-Host global Port comes first, so it wins over the block value.
+          port: 2022,
+          source: "ssh-config",
+        },
+        {
+          alias: "devbox2",
+          hostname: "devbox2",
+          username: "everyone",
+          port: 2022,
+          source: "ssh-config",
+        },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("applies wildcard host sections to known_hosts entries", () =>
+    Effect.gen(function* () {
+      const homeDir = yield* makeTempHomeDir();
+      yield* writeSshFile("config", ["Host *.example.com", "  User admin"], homeDir);
+      yield* writeSshFile("known_hosts", ["known.example.com ssh-ed25519 AAAA"], homeDir);
+
+      const hosts = yield* discoverSshHosts({ homeDir });
+      assert.deepEqual(hosts, [
+        {
+          alias: "known.example.com",
+          hostname: "known.example.com",
+          username: "admin",
+          port: null,
+          source: "known-hosts",
+        },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("continues the active host section across include boundaries", () =>
+    Effect.gen(function* () {
+      const homeDir = yield* makeTempHomeDir();
+      yield* writeSshFile(
+        "config",
+        ["Host spliced", "Include config.d/spliced.conf", "  Port 2222"],
+        homeDir,
+      );
+      yield* writeSshFile("config.d/spliced.conf", ["  HostName spliced.example.com"], homeDir);
+
+      const hosts = yield* discoverSshHosts({ homeDir });
+      assert.deepEqual(hosts, [
+        {
+          alias: "spliced",
+          hostname: "spliced.example.com",
+          username: null,
+          port: 2222,
           source: "ssh-config",
         },
       ]);
