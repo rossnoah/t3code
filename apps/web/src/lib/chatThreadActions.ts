@@ -101,3 +101,21 @@ export async function startNewLocalThreadFromContext(
   await context.handleNewThread(projectRef);
   return true;
 }
+
+export async function startNewWorktreeThreadFromContext(
+  context: ChatThreadActionContext,
+): Promise<boolean> {
+  const projectRef = resolveThreadActionProjectRef(context);
+  if (!projectRef) {
+    return false;
+  }
+
+  // A fresh worktree: no inherited branch or worktree path, so the server
+  // materializes a new working tree when the thread starts.
+  await context.handleNewThread(projectRef, {
+    branch: null,
+    worktreePath: null,
+    envMode: "worktree",
+  });
+  return true;
+}

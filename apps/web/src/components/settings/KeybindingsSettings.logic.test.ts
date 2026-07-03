@@ -165,7 +165,7 @@ describe("KeybindingsSettings.logic", () => {
         {
           command: "chat.new",
           shortcut: {
-            key: "n",
+            key: "t",
             modKey: true,
             metaKey: false,
             ctrlKey: false,

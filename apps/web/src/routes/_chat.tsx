@@ -4,10 +4,16 @@ import { useEffect } from "react";
 
 import { isCommandPaletteOpen } from "../commandPaletteContext";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useThreadActions } from "../hooks/useThreadActions";
 import {
   startNewLocalThreadFromContext,
   startNewThreadFromContext,
+  startNewWorktreeThreadFromContext,
 } from "../lib/chatThreadActions";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
@@ -24,6 +30,7 @@ function ChatRouteGlobalShortcuts() {
   const selectedThreadKeysSize = useThreadSelectionStore((state) => state.selectedThreadKeys.size);
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread, routeThreadRef } =
     useHandleNewThread();
+  const { archiveThread } = useThreadActions();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const terminalOpen = useTerminalUiStateStore((state) =>
     routeThreadRef
@@ -84,6 +91,38 @@ function ChatRouteGlobalShortcuts() {
         return;
       }
 
+      if (command === "chat.newWorktree") {
+        event.preventDefault();
+        event.stopPropagation();
+        void startNewWorktreeThreadFromContext({
+          activeDraftThread,
+          activeThread: activeThread ?? undefined,
+          defaultProjectRef,
+          handleNewThread,
+        });
+        return;
+      }
+
+      if (command === "chat.closeTab") {
+        if (!routeThreadRef) return;
+        event.preventDefault();
+        event.stopPropagation();
+        void (async () => {
+          const result = await archiveThread(routeThreadRef);
+          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Unable to close tab",
+                description: error instanceof Error ? error.message : "An error occurred.",
+              }),
+            );
+          }
+        })();
+        return;
+      }
+
       if (command === "preview.toggle") {
         event.preventDefault();
         event.stopPropagation();
@@ -135,6 +174,7 @@ function ChatRouteGlobalShortcuts() {
   }, [
     activeDraftThread,
     activeThread,
+    archiveThread,
     clearSelection,
     handleNewThread,
     keybindings,
