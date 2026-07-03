@@ -170,7 +170,12 @@ export const make = Effect.gen(function* () {
                 },
                 { type: "separator" as const },
               ]),
-          { role: environment.platform === "darwin" ? "close" : "quit" },
+          // Chrome-style tabs: plain Cmd+W must reach the renderer (it
+          // archives the active thread tab), so the window-close role moves
+          // to Cmd+Shift+W instead of claiming the default Cmd+W accelerator.
+          environment.platform === "darwin"
+            ? { role: "close", accelerator: "CmdOrCtrl+Shift+W" }
+            : { role: "quit" },
         ],
       },
       { role: "editMenu" },
