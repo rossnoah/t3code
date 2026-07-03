@@ -6,7 +6,8 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { memo } from "react";
+import * as Option from "effect/Option";
+import { memo, useCallback } from "react";
 import GitActionsControl from "../GitActionsControl";
 import { type DraftId } from "~/composerDraftStore";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -15,7 +16,11 @@ import ProjectScriptsControl, {
   type ProjectScriptActionResult,
 } from "../ProjectScriptsControl";
 import { OpenInPicker } from "./OpenInPicker";
-import { usePrimaryEnvironmentId } from "../../state/environments";
+import { useEnvironment, usePrimaryEnvironmentId } from "../../state/environments";
+import { Button } from "../ui/button";
+import { CursorIcon } from "../Icons";
+import { shellEnvironment } from "~/state/shell";
+import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
 
 interface ChatHeaderProps {
@@ -76,6 +81,36 @@ export const ChatHeader = memo(function ChatHeader({
     activeThreadEnvironmentId,
     primaryEnvironmentId,
   });
+  const activeEnvironment = useEnvironment(activeThreadEnvironmentId);
+  const activeEnvironmentEntry = activeEnvironment?.entry ?? null;
+  // The ssh config Host alias of the active environment; Cursor resolves
+  // HostName/User/Port from the local ssh config through this alias.
+  const sshRemoteHost =
+    activeEnvironmentEntry !== null &&
+    activeEnvironmentEntry.target._tag === "SshConnectionTarget" &&
+    Option.isSome(activeEnvironmentEntry.profile) &&
+    activeEnvironmentEntry.profile.value._tag === "SshConnectionProfile"
+      ? activeEnvironmentEntry.profile.value.target.alias
+      : null;
+  const openInEditorMutation = useAtomCommand(shellEnvironment.openInEditor, "open in cursor");
+  // Cursor always launches on the local (primary) machine: plain open for
+  // local threads, `--remote ssh-remote+<alias>` for ssh-backed threads.
+  const showOpenInCursor =
+    openInCwd !== null &&
+    primaryEnvironmentId !== null &&
+    availableEditors.includes("cursor") &&
+    (activeThreadEnvironmentId === primaryEnvironmentId || sshRemoteHost !== null);
+  const openInCursor = useCallback(() => {
+    if (!openInCwd || primaryEnvironmentId === null) return;
+    void openInEditorMutation({
+      environmentId: primaryEnvironmentId,
+      input: {
+        cwd: openInCwd,
+        editor: "cursor",
+        ...(sshRemoteHost !== null ? { sshRemoteHost } : {}),
+      },
+    });
+  }, [openInCwd, openInEditorMutation, primaryEnvironmentId, sshRemoteHost]);
   return (
     <div className="@container/header-actions flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
@@ -100,6 +135,23 @@ export const ChatHeader = memo(function ChatHeader({
           rightPanelOpen ? "pr-0" : "pr-16",
         )}
       >
+        {showOpenInCursor && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon-xs"
+                  variant="outline"
+                  aria-label="Open in Cursor"
+                  onClick={openInCursor}
+                />
+              }
+            >
+              <CursorIcon aria-hidden="true" className="size-3.5" />
+            </TooltipTrigger>
+            <TooltipPopup side="top">Open in Cursor</TooltipPopup>
+          </Tooltip>
+        )}
         {activeProjectScripts && (
           <ProjectScriptsControl
             scripts={activeProjectScripts}

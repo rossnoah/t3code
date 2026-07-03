@@ -130,6 +130,57 @@ it.effect("launches an installed editor with platform-safe arguments", () =>
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("launches cursor against an ssh remote host", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const binDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-editors-" });
+    const cursorPath = path.join(binDir, "cursor");
+    yield* fileSystem.writeFileString(cursorPath, "#!/bin/sh\n");
+    yield* fileSystem.chmod(cursorPath, 0o755);
+
+    let spawned: ChildProcess.StandardCommand | undefined;
+    yield* Effect.gen(function* () {
+      const launcher = yield* ExternalLauncher.ExternalLauncher;
+      yield* launcher.launchEditor({
+        editor: "cursor",
+        cwd: "/home/dev/worktrees/feature",
+        sshRemoteHost: "devbox",
+      });
+    }).pipe(
+      Effect.provide(
+        testLayer({
+          platform: "linux",
+          env: { PATH: binDir },
+          onSpawn: (command) => {
+            spawned = command;
+          },
+        }),
+      ),
+    );
+
+    assert.ok(spawned);
+    assert.equal(spawned.command, "cursor");
+    assert.deepEqual(spawned.args, [
+      "--remote",
+      "ssh-remote+devbox",
+      "/home/dev/worktrees/feature",
+    ]);
+    assert.equal(spawned.options.detached, true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("rejects ssh remote launches for editors without remote support", () =>
+  Effect.gen(function* () {
+    const launcher = yield* ExternalLauncher.ExternalLauncher;
+    const error = yield* launcher
+      .launchEditor({ editor: "file-manager", cwd: "/tmp/workspace", sshRemoteHost: "devbox" })
+      .pipe(Effect.flip);
+    assert.instanceOf(error, ExternalLauncher.ExternalLauncherUnsupportedEditorError);
+    assert.equal(error.editor, "file-manager");
+  }).pipe(Effect.provide(testLayer({ platform: "linux", env: { PATH: "" } }))),
+);
+
 it.effect("discovers editors through the service API", () =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;

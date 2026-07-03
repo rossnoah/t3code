@@ -335,6 +335,25 @@ const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
     return yield* new ExternalLauncherUnknownEditorError({ editor: input.editor });
   }
 
+  if (input.sshRemoteHost !== undefined) {
+    // Remote launches ride on the VS Code-family `--remote` flag, so only
+    // "goto"-style command editors qualify; `cwd` is a path on the remote host.
+    if (!editorDef.commands || editorDef.launchStyle !== "goto") {
+      return yield* new ExternalLauncherUnsupportedEditorError({ editor: editorDef.id });
+    }
+    const command = Option.getOrElse(
+      yield* resolveAvailableCommand(editorDef.commands, env),
+      () => editorDef.commands[0],
+    );
+    const baseArgs = "baseArgs" in editorDef ? editorDef.baseArgs : [];
+    return {
+      editor: editorDef.id,
+      target: input.cwd,
+      command,
+      args: [...baseArgs, "--remote", `ssh-remote+${input.sshRemoteHost}`, input.cwd],
+    };
+  }
+
   if (editorDef.commands) {
     const command = Option.getOrElse(
       yield* resolveAvailableCommand(editorDef.commands, env),

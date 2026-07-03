@@ -47,6 +47,12 @@ export type EditorId = typeof EditorId.Type;
 export const LaunchEditorInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   editor: EditorId,
+  /**
+   * SSH config host alias to open `cwd` on via the editor's remote-SSH support
+   * (`--remote ssh-remote+<host>`). When set, `cwd` is a path on that remote
+   * host, not on the machine launching the editor.
+   */
+  sshRemoteHost: Schema.optional(TrimmedNonEmptyString),
 });
 export type LaunchEditorInput = typeof LaunchEditorInput.Type;
 
