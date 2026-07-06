@@ -1,8 +1,11 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
 import { type OrchestrationProject, ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -66,7 +69,21 @@ const testLayer = (
   ProjectSetupScriptRunner.layer.pipe(
     Layer.provideMerge(makeProjectionSnapshotQueryLayer(project)),
     Layer.provideMerge(makeTerminalManagerLayer(terminal)),
+    Layer.provideMerge(NodeServices.layer),
   );
+
+const makeWorktreeDir = (files: Record<string, string>) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const worktreePath = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "t3code-setup-script-",
+    });
+    for (const [relativePath, contents] of Object.entries(files)) {
+      yield* fileSystem.writeFileString(path.join(worktreePath, relativePath), contents);
+    }
+    return worktreePath;
+  });
 
 describe("ProjectSetupScriptRunner", () => {
   it.effect("returns no-script when no setup script exists", () => {
@@ -150,6 +167,143 @@ describe("ProjectSetupScriptRunner", () => {
       }).pipe(Effect.provide(testLayer(project, { open, write })));
     },
   );
+
+  it.effect("runs the repo-committed setup command when the project has no setup script", () => {
+    const open = vi.fn(() => Effect.succeed({}) as never);
+    const write = vi.fn(() => Effect.void);
+    const project = makeProject([]);
+
+    return Effect.gen(function* () {
+      const worktreePath = yield* makeWorktreeDir({
+        "t3code.json": '{ "scripts": { "setup": "pnpm install" } }',
+      });
+      const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+      const result = yield* runner.runForThread({
+        threadId: "thread-1",
+        projectId: "project-1",
+        worktreePath,
+      });
+
+      expect(result).toEqual({
+        status: "started",
+        scriptId: ProjectSetupScriptRunner.REPO_SETUP_SCRIPT_ID,
+        scriptName: "Setup (t3code.json)",
+        terminalId: `setup-${ProjectSetupScriptRunner.REPO_SETUP_SCRIPT_ID}`,
+        cwd: worktreePath,
+      });
+      expect(write).toHaveBeenCalledWith({
+        threadId: "thread-1",
+        terminalId: `setup-${ProjectSetupScriptRunner.REPO_SETUP_SCRIPT_ID}`,
+        data: "pnpm install\r",
+      });
+    }).pipe(Effect.provide(testLayer(project, { open, write })), Effect.scoped);
+  });
+
+  it.effect("tolerates extra keys in the repo config file", () => {
+    const open = vi.fn(() => Effect.succeed({}) as never);
+    const write = vi.fn(() => Effect.void);
+    const project = makeProject([]);
+
+    return Effect.gen(function* () {
+      const worktreePath = yield* makeWorktreeDir({
+        "t3code.json":
+          '{ "scripts": { "setup": "npm install", "run": "npm run dev" }, "runScriptMode": "concurrent" }',
+      });
+      const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+      const result = yield* runner.runForThread({
+        threadId: "thread-1",
+        projectId: "project-1",
+        worktreePath,
+      });
+
+      expect(result).toMatchObject({
+        status: "started",
+        scriptName: "Setup (t3code.json)",
+      });
+      expect(write).toHaveBeenCalledWith(expect.objectContaining({ data: "npm install\r" }));
+    }).pipe(Effect.provide(testLayer(project, { open, write })), Effect.scoped);
+  });
+
+  it.effect("prefers the project's setup script over the repo config file", () => {
+    const open = vi.fn(() => Effect.succeed({}) as never);
+    const write = vi.fn(() => Effect.void);
+    const project = makeProject([
+      {
+        id: "setup",
+        name: "Setup",
+        command: "bun install",
+        icon: "configure",
+        runOnWorktreeCreate: true,
+      },
+    ]);
+
+    return Effect.gen(function* () {
+      const worktreePath = yield* makeWorktreeDir({
+        "t3code.json": '{ "scripts": { "setup": "pnpm install" } }',
+      });
+      const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+      const result = yield* runner.runForThread({
+        threadId: "thread-1",
+        projectId: "project-1",
+        worktreePath,
+      });
+
+      expect(result).toMatchObject({ status: "started", scriptId: "setup" });
+      expect(write).toHaveBeenCalledWith(expect.objectContaining({ data: "bun install\r" }));
+    }).pipe(Effect.provide(testLayer(project, { open, write })), Effect.scoped);
+  });
+
+  it.effect("ignores repo config files without a usable setup command", () => {
+    const open = vi.fn(() => Effect.die("unexpected open"));
+    const write = vi.fn(() => Effect.die("unexpected write"));
+    const project = makeProject([]);
+
+    return Effect.gen(function* () {
+      const worktreePath = yield* makeWorktreeDir({
+        "t3code.json": "{not json",
+      });
+      const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+      const result = yield* runner.runForThread({
+        threadId: "thread-1",
+        projectId: "project-1",
+        worktreePath,
+      });
+
+      expect(result).toEqual({ status: "no-script" });
+      expect(open).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(testLayer(project, { open, write })), Effect.scoped);
+  });
+
+  it.effect("copies configured files into the worktree even without a setup script", () => {
+    const open = vi.fn(() => Effect.die("unexpected open"));
+    const write = vi.fn(() => Effect.die("unexpected write"));
+
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const rootPath = yield* makeWorktreeDir({ ".env.local": "SECRET=1" });
+      const worktreePath = yield* makeWorktreeDir({});
+      const project: OrchestrationProject = {
+        ...makeProject([]),
+        workspaceRoot: rootPath,
+        copyFilePatterns: [".env*"],
+      };
+
+      const result = yield* Effect.gen(function* () {
+        const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+        return yield* runner.runForThread({
+          threadId: "thread-1",
+          projectId: "project-1",
+          worktreePath,
+        });
+      }).pipe(Effect.provide(testLayer(project, { open, write })));
+
+      expect(result).toEqual({ status: "no-script" });
+      expect(yield* fileSystem.readFileString(path.join(worktreePath, ".env.local"))).toBe(
+        "SECRET=1",
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
+  });
 
   it.effect("keeps terminal failures as the exact cause of a structured operation error", () => {
     const rootCause = new Error("stat failed");

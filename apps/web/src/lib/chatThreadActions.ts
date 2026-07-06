@@ -22,6 +22,7 @@ interface NewThreadHandler {
       worktreePath?: string | null;
       envMode?: DraftThreadEnvMode;
       startFromOrigin?: boolean;
+      forceNew?: boolean;
     },
   ): Promise<void>;
 }
@@ -75,7 +76,10 @@ export async function startNewThreadInProjectFromContext(
   context: ChatThreadActionContext,
   projectRef: ScopedProjectRef,
 ): Promise<void> {
-  await context.handleNewThread(projectRef, buildContextualThreadOptions(context));
+  await context.handleNewThread(projectRef, {
+    ...buildContextualThreadOptions(context),
+    forceNew: true,
+  });
 }
 
 export async function startNewThreadFromContext(
@@ -98,7 +102,7 @@ export async function startNewLocalThreadFromContext(
     return false;
   }
 
-  await context.handleNewThread(projectRef);
+  await context.handleNewThread(projectRef, { forceNew: true });
   return true;
 }
 
@@ -116,6 +120,7 @@ export async function startNewWorktreeThreadFromContext(
     branch: null,
     worktreePath: null,
     envMode: "worktree",
+    forceNew: true,
   });
   return true;
 }

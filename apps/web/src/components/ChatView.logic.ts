@@ -242,6 +242,35 @@ export function deriveComposerSendState(options: {
   };
 }
 
+/**
+ * Whether the thread's queued follow-up messages may be auto-flushed right now.
+ *
+ * Queued messages are sent one turn at a time whenever there is no running task:
+ * the latest turn is settled and nothing is working (running / connecting /
+ * sending / reverting — all folded into `isWorking`). We also hold while a modal
+ * composer flow owns the input (a pending approval, a pending user-input
+ * question, or a plan follow-up prompt) or the environment is unavailable. A
+ * disconnected-but-idle session still flushes — `startTurn` reconnects it — so a
+ * queue that was staged before a reload drains once the app settles.
+ */
+export function canFlushQueue(params: {
+  latestTurnSettled: boolean;
+  isWorking: boolean;
+  hasPendingApproval: boolean;
+  hasPendingUserInput: boolean;
+  hasPlanFollowUp: boolean;
+  environmentUnavailable: boolean;
+}): boolean {
+  return (
+    params.latestTurnSettled &&
+    !params.isWorking &&
+    !params.hasPendingApproval &&
+    !params.hasPendingUserInput &&
+    !params.hasPlanFollowUp &&
+    !params.environmentUnavailable
+  );
+}
+
 export function buildExpiredTerminalContextToastCopy(
   expiredTerminalContextCount: number,
   variant: "omitted" | "empty",

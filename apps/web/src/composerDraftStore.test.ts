@@ -66,7 +66,9 @@ import {
   markPromotedDraftThreads,
   markPromotedDraftThreadsByRef,
   type ComposerImageAttachment,
+  type QueuedMessage,
   useComposerDraftStore,
+  workspaceDraftSessions,
   DraftId,
 } from "./composerDraftStore";
 import { removeLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
@@ -836,18 +838,77 @@ describe("composerDraftStore project draft thread mapping", () => {
     }
   });
 
-  it("clears orphaned composer drafts when remapping a project to a new draft thread", () => {
+  it("keeps earlier drafts open when remapping a project to a new draft thread", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, { threadId });
-    store.setPrompt(draftId, "orphan me");
+    store.setPrompt(draftId, "keep me open");
 
     store.setProjectDraftThreadId(projectRef, otherDraftId, { threadId: otherThreadId });
 
-    expect(useComposerDraftStore.getState().getDraftThreadByProjectRef(projectRef)?.threadId).toBe(
+    const next = useComposerDraftStore.getState();
+    // The mapping tracks the most recent draft…
+    expect(next.getDraftSessionByLogicalProjectKey(scopedProjectKey(projectRef))?.threadId).toBe(
       otherThreadId,
     );
-    expect(useComposerDraftStore.getState().getDraftThread(draftId)).toBeNull();
-    expect(draftByKey(draftId)).toBeUndefined();
+    // …but the earlier draft stays alive as its own tab.
+    expect(next.getDraftThread(draftId)?.threadId).toBe(threadId);
+    expect(draftByKey(draftId)?.prompt).toBe("keep me open");
+  });
+
+  it("lists a workspace's unpromoted drafts in creation order", () => {
+    const store = useComposerDraftStore.getState();
+    const promotedDraftId = DraftId.make("draft-promoted");
+    store.setProjectDraftThreadId(projectRef, otherDraftId, {
+      threadId: otherThreadId,
+      createdAt: "2026-01-02T00:00:00.000Z",
+      worktreePath: "/tmp/worktree-a",
+    });
+    store.setProjectDraftThreadId(projectRef, draftId, {
+      threadId,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      worktreePath: "/tmp/worktree-a",
+    });
+    store.setProjectDraftThreadId(projectRef, localDraftId, {
+      threadId: ThreadId.make("thread-local"),
+      createdAt: "2026-01-03T00:00:00.000Z",
+    });
+    store.setProjectDraftThreadId(projectRef, promotedDraftId, {
+      threadId: ThreadId.make("thread-promoted"),
+      createdAt: "2026-01-04T00:00:00.000Z",
+      worktreePath: "/tmp/worktree-a",
+    });
+    store.markDraftThreadPromoting(promotedDraftId);
+
+    const state = useComposerDraftStore.getState();
+    const worktreeSessions = workspaceDraftSessions(state.draftThreadsByThreadKey, {
+      environmentId: TEST_ENVIRONMENT_ID,
+      projectId,
+      worktreePath: "/tmp/worktree-a",
+    });
+    expect(worktreeSessions.map((session) => session.draftId)).toEqual([draftId, otherDraftId]);
+
+    const mainSessions = workspaceDraftSessions(state.draftThreadsByThreadKey, {
+      environmentId: TEST_ENVIRONMENT_ID,
+      projectId,
+      worktreePath: null,
+    });
+    expect(mainSessions.map((session) => session.draftId)).toEqual([localDraftId]);
+  });
+
+  it("clears every draft of a project when clearing by project id", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    store.setProjectDraftThreadId(projectRef, otherDraftId, { threadId: otherThreadId });
+    store.setProjectDraftThreadId(otherProjectRef, localDraftId, {
+      threadId: ThreadId.make("thread-local"),
+    });
+
+    store.clearProjectDraftThreadId(projectRef);
+
+    const next = useComposerDraftStore.getState();
+    expect(next.getDraftThread(draftId)).toBeNull();
+    expect(next.getDraftThread(otherDraftId)).toBeNull();
+    expect(next.getDraftThread(localDraftId)).not.toBeNull();
   });
 
   it("keeps composer drafts when the thread is still mapped by another project", () => {
@@ -1766,5 +1827,147 @@ describe("createDebouncedStorage", () => {
     vi.advanceTimersByTime(300);
     expect(base.setItem).toHaveBeenCalledTimes(1);
     expect(base.setItem).toHaveBeenCalledWith("key", "v2");
+  });
+});
+
+describe("composerDraftStore queued messages", () => {
+  const threadId = ThreadId.make("thread-queue");
+  const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+  const threadKey = threadKeyFor(threadId, TEST_ENVIRONMENT_ID);
+
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  function makeQueued(input: {
+    id: string;
+    text?: string;
+    images?: ComposerImageAttachment[];
+    modelSelection?: ModelSelection | null;
+  }): QueuedMessage {
+    return {
+      id: input.id,
+      text: input.text ?? `message ${input.id}`,
+      images: input.images ?? [],
+      terminalContexts: [],
+      elementContexts: [],
+      previewAnnotations: [],
+      reviewComments: [],
+      modelSelection: input.modelSelection ?? null,
+      runtimeMode: null,
+      interactionMode: null,
+    };
+  }
+
+  it("enqueues in order and dedupes by id", () => {
+    const store = useComposerDraftStore.getState();
+    store.enqueueMessage(threadRef, makeQueued({ id: "a", text: "first" }));
+    store.enqueueMessage(threadRef, makeQueued({ id: "b", text: "second" }));
+    store.enqueueMessage(threadRef, makeQueued({ id: "a", text: "first-updated" }));
+
+    const queued = draftByKey(threadKey)?.queuedMessages ?? [];
+    expect(queued.map((message) => message.id)).toEqual(["b", "a"]);
+    expect(queued.at(-1)?.text).toBe("first-updated");
+  });
+
+  it("ignores blank enqueues", () => {
+    useComposerDraftStore.getState().enqueueMessage(threadRef, makeQueued({ id: "a", text: "   " }));
+    expect(draftByKey(threadKey)).toBeUndefined();
+  });
+
+  it("updates a queued message's text and removes by id", () => {
+    const store = useComposerDraftStore.getState();
+    store.enqueueMessage(threadRef, makeQueued({ id: "a" }));
+    store.enqueueMessage(threadRef, makeQueued({ id: "b" }));
+
+    store.updateQueuedMessage(threadRef, "a", "edited");
+    expect(draftByKey(threadKey)?.queuedMessages[0]?.text).toBe("edited");
+
+    store.removeQueuedMessage(threadRef, "a");
+    expect(draftByKey(threadKey)?.queuedMessages.map((message) => message.id)).toEqual(["b"]);
+  });
+
+  it("reorders via setQueuedMessages", () => {
+    const store = useComposerDraftStore.getState();
+    store.enqueueMessage(threadRef, makeQueued({ id: "a" }));
+    store.enqueueMessage(threadRef, makeQueued({ id: "b" }));
+    store.enqueueMessage(threadRef, makeQueued({ id: "c" }));
+
+    const current = draftByKey(threadKey)?.queuedMessages ?? [];
+    store.setQueuedMessages(threadRef, [current[2]!, current[0]!, current[1]!]);
+    expect(draftByKey(threadKey)?.queuedMessages.map((message) => message.id)).toEqual([
+      "c",
+      "a",
+      "b",
+    ]);
+  });
+
+  it("dequeues the head and returns it", () => {
+    const store = useComposerDraftStore.getState();
+    store.enqueueMessage(threadRef, makeQueued({ id: "a", text: "head" }));
+    store.enqueueMessage(threadRef, makeQueued({ id: "b", text: "tail" }));
+
+    const head = store.dequeueMessage(threadRef);
+    expect(head?.id).toBe("a");
+    expect(draftByKey(threadKey)?.queuedMessages.map((message) => message.id)).toEqual(["b"]);
+
+    const next = store.dequeueMessage(threadRef);
+    expect(next?.id).toBe("b");
+    // Draft is GC'd once the queue (and everything else) is empty.
+    expect(draftByKey(threadKey)).toBeUndefined();
+    expect(store.dequeueMessage(threadRef)).toBeNull();
+  });
+
+  it("keeps a queue-only draft alive and survives clearComposerContent", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadRef, "in-progress text");
+    store.enqueueMessage(threadRef, makeQueued({ id: "a", text: "queued" }));
+
+    store.clearComposerContent(threadRef);
+    const draft = draftByKey(threadKey);
+    expect(draft?.prompt).toBe("");
+    expect(draft?.queuedMessages.map((message) => message.id)).toEqual(["a"]);
+  });
+
+  it("persists queued text/model but not image blobs, and rehydrates empty attachments", () => {
+    const store = useComposerDraftStore.getState();
+    store.enqueueMessage(
+      threadRef,
+      makeQueued({
+        id: "a",
+        text: "keep me",
+        images: [makeImage({ id: "img-1", previewUrl: "blob:img-1" })],
+        modelSelection: modelSelection(CODEX_DRIVER, "gpt-5"),
+      }),
+    );
+
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        partialize: (state: ReturnType<typeof useComposerDraftStore.getState>) => unknown;
+        merge: (
+          persistedState: unknown,
+          currentState: ReturnType<typeof useComposerDraftStore.getState>,
+        ) => ReturnType<typeof useComposerDraftStore.getState>;
+      };
+    };
+    const persisted = persistApi.getOptions().partialize(useComposerDraftStore.getState()) as {
+      draftsByThreadKey?: Record<
+        string,
+        { queuedMessages?: Array<Record<string, unknown>> }
+      >;
+    };
+    const persistedQueued = persisted.draftsByThreadKey?.[threadKey]?.queuedMessages?.[0];
+    expect(persistedQueued).toMatchObject({ id: "a", text: "keep me" });
+    expect(persistedQueued?.modelSelection).toBeDefined();
+    expect(persistedQueued?.images).toBeUndefined();
+
+    const merged = persistApi.getOptions().merge(
+      { draftsByThreadKey: { [threadKey]: persisted.draftsByThreadKey?.[threadKey] } },
+      useComposerDraftStore.getState(),
+    );
+    const rehydrated = merged.draftsByThreadKey[threadKey]?.queuedMessages?.[0];
+    expect(rehydrated?.text).toBe("keep me");
+    expect(rehydrated?.images).toEqual([]);
+    expect(rehydrated?.modelSelection?.model).toBe("gpt-5");
   });
 });

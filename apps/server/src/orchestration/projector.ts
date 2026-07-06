@@ -240,6 +240,9 @@ export function projectEvent(
                     ? { defaultModelSelection: payload.defaultModelSelection }
                     : {}),
                   ...(payload.scripts !== undefined ? { scripts: payload.scripts } : {}),
+                  ...(payload.copyFilePatterns !== undefined
+                    ? { copyFilePatterns: payload.copyFilePatterns }
+                    : {}),
                   updatedAt: payload.updatedAt,
                 }
               : project,

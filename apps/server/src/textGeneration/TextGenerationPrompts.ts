@@ -202,7 +202,8 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
     responseShape: "Return a JSON object with key: title.",
     rules: [
       "Title should summarize the user's request, not restate it verbatim.",
-      "Keep it short and specific (3-8 words).",
+      "Titles render in fixed-width tabs that truncate after roughly 18 characters.",
+      "Keep it within ~18 characters (2-3 short words); put the distinguishing words first.",
       "Avoid quotes, filler, prefixes, and trailing punctuation.",
       "If images are attached, use them as primary context for visual/UI issues.",
     ],

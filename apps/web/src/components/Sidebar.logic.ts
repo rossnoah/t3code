@@ -398,6 +398,21 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
+  // A live session whose latest turn started but hasn't completed is still
+  // working: the session status often flips to ready/idle an event before
+  // `completedAt` lands, and without this bridge the indicator blinks off
+  // between Working and Completed instead of switching color directly.
+  // (running/starting already returned above.)
+  const sessionAlive = thread.session?.status === "ready" || thread.session?.status === "idle";
+  if (sessionAlive && thread.latestTurn?.startedAt && !thread.latestTurn.completedAt) {
+    return {
+      label: "Working",
+      colorClass: "text-sky-600 dark:text-sky-300/80",
+      dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      pulse: true,
+    };
+  }
+
   const hasPlanReadyPrompt =
     !thread.hasPendingUserInput &&
     thread.interactionMode === "plan" &&

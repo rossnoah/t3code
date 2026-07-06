@@ -190,6 +190,15 @@ export function readEnvironmentThreadRefs(
   return appAtomRegistry.get(environmentThreadShells.environmentThreadRefsAtom(environmentId));
 }
 
+export function readEnvironmentThreadShells(
+  environmentId: EnvironmentId,
+): EnvironmentThreadShell[] {
+  return readEnvironmentThreadRefs(environmentId).flatMap((ref) => {
+    const shell = readThreadShell(ref);
+    return shell === null ? [] : [shell];
+  });
+}
+
 export function readThreadRefs(): ReadonlyArray<ScopedThreadRef> {
   return appAtomRegistry.get(environmentThreadShells.threadRefsAtom);
 }

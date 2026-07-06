@@ -62,6 +62,7 @@ import { type ElementContextDraft } from "../../lib/elementContext";
 import { ComposerPendingElementContexts } from "./ComposerPendingElementContexts";
 import { ComposerPendingReviewComments } from "./ComposerPendingReviewComments";
 import { ComposerPreviewAnnotationCards } from "./ComposerPreviewAnnotationCards";
+import { ComposerMessageQueue } from "./ComposerMessageQueue";
 import {
   shouldUseCompactComposerPrimaryActions,
   shouldUseCompactComposerFooter,
@@ -506,6 +507,8 @@ export interface ChatComposerProps {
 
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
+  /** Stage the composed message into the send queue (bound to Tab). */
+  onQueue: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
@@ -590,6 +593,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerTerminalContextsRef,
     composerElementContextsRef,
     onSend,
+    onQueue,
     onInterrupt,
     onImplementPlanInNewThread,
     onRespondToApproval,
@@ -1044,14 +1048,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const showCollapsedMobilePromptRow =
     isComposerCollapsedMobile && !isComposerApprovalState && pendingUserInputs.length === 0;
 
-  const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
+  const composerFooterHasWideActions =
+    showPlanFollowUpPrompt ||
+    activePendingProgress !== null ||
+    // Running + sendable content renders Stop *and* Send side by side.
+    (phase === "running" && composerSendState.hasSendableContent);
   const showPlanSidebarToggle = Boolean(activePlan || sidebarProposedPlan || planSidebarOpen);
   const composerFooterActionLayoutKey = useMemo(() => {
     if (activePendingProgress) {
       return `pending:${activePendingProgress.questionIndex}:${activePendingProgress.isLastQuestion}:${activePendingIsResponding}`;
     }
     if (phase === "running") {
-      return "running";
+      return `running:${composerSendState.hasSendableContent}`;
     }
     if (showPlanFollowUpPrompt) {
       return prompt.trim().length > 0 ? "plan:refine" : "plan:implement";
@@ -1750,6 +1758,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return true;
       }
     }
+    // Tab stages the message into the send queue; Enter sends normally. Only
+    // capture Tab when there's something to queue so an empty composer still
+    // tabs away.
+    if (key === "Tab" && composerSendState.hasSendableContent) {
+      onQueue();
+      return true;
+    }
     if (key === "Enter" && !event.shiftKey) {
       submitComposer();
       return true;
@@ -2231,6 +2246,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               </button>
             </div>
           ) : null}
+
+          {!isComposerCollapsedMobile &&
+            !isComposerApprovalState &&
+            pendingUserInputs.length === 0 && (
+              <div className="px-3 sm:px-4">
+                <ComposerMessageQueue target={composerDraftTarget} className="mt-2" />
+              </div>
+            )}
 
           <div
             className={cn(

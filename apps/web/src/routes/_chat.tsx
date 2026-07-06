@@ -1,4 +1,4 @@
-import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
+import { Outlet, createFileRoute, redirect, useParams } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import { useEffect } from "react";
 
@@ -8,8 +8,10 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import { useCloseDraftTab } from "../hooks/useCloseDraftTab";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useThreadActions } from "../hooks/useThreadActions";
+import { resolveThreadRouteTarget } from "../threadRoutes";
 import {
   startNewLocalThreadFromContext,
   startNewThreadFromContext,
@@ -30,7 +32,15 @@ function ChatRouteGlobalShortcuts() {
   const selectedThreadKeysSize = useThreadSelectionStore((state) => state.selectedThreadKeys.size);
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread, routeThreadRef } =
     useHandleNewThread();
+  const routeDraftId = useParams({
+    strict: false,
+    select: (params) => {
+      const target = resolveThreadRouteTarget(params);
+      return target?.kind === "draft" ? target.draftId : null;
+    },
+  });
   const { archiveThread } = useThreadActions();
+  const closeDraftTab = useCloseDraftTab();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const terminalOpen = useTerminalUiStateStore((state) =>
     routeThreadRef
@@ -104,6 +114,12 @@ function ChatRouteGlobalShortcuts() {
       }
 
       if (command === "chat.closeTab") {
+        if (routeDraftId) {
+          event.preventDefault();
+          event.stopPropagation();
+          void closeDraftTab(routeDraftId);
+          return;
+        }
         if (!routeThreadRef) return;
         event.preventDefault();
         event.stopPropagation();
@@ -176,10 +192,12 @@ function ChatRouteGlobalShortcuts() {
     activeThread,
     archiveThread,
     clearSelection,
+    closeDraftTab,
     handleNewThread,
     keybindings,
     defaultProjectRef,
     previewOpen,
+    routeDraftId,
     routeThreadRef,
     selectedThreadKeysSize,
     terminalOpen,

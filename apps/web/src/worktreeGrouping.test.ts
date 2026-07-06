@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import {
+  buildSidebarWorkspaceGroups,
   buildWorkspaceGroups,
   MAIN_WORKSPACE_LABEL,
   resolveWorkspaceTerminalAnchorRef,
+  UNNAMED_WORKSPACE_LABEL,
+  type WorkspaceDraftInput,
+  workspaceDisplayLabel,
   workspaceGroupKey,
   workspaceGroupRepresentative,
   workspaceThreads,
@@ -58,14 +62,14 @@ describe("buildWorkspaceGroups", () => {
     expect(worktree?.label).toBe("feature-x");
   });
 
-  it("orders the main checkout first, then worktrees by latest activity", () => {
+  it("orders worktrees by latest activity, with the main checkout pinned to the bottom", () => {
     const groups = buildWorkspaceGroups([
       makeThread({ id: "old", worktreePath: "/w/old", updatedAt: "2026-01-01T00:00:00.000Z" }),
       makeThread({ id: "new", worktreePath: "/w/new", updatedAt: "2026-03-01T00:00:00.000Z" }),
       makeThread({ id: "main", updatedAt: "2026-02-01T00:00:00.000Z" }),
     ]);
 
-    expect(groups.map((group) => group.worktreePath)).toEqual([null, "/w/new", "/w/old"]);
+    expect(groups.map((group) => group.worktreePath)).toEqual(["/w/new", "/w/old", null]);
   });
 
   it("keeps tab order stable by creation time", () => {
@@ -105,6 +109,46 @@ describe("buildWorkspaceGroups", () => {
 
     expect(groups[0]?.branch).toBe("new-branch");
   });
+
+  it("labels workspaces from the branch once it has a generated name", () => {
+    const groups = buildWorkspaceGroups([
+      makeThread({ id: "a", worktreePath: "/w/noah-1a2b3c4d", branch: "noah/fix-tab-widths" }),
+    ]);
+
+    expect(groups[0]?.label).toBe("fix-tab-widths");
+  });
+});
+
+describe("workspaceDisplayLabel", () => {
+  it("labels the main checkout", () => {
+    expect(workspaceDisplayLabel({ worktreePath: null, branch: "main" })).toBe(
+      MAIN_WORKSPACE_LABEL,
+    );
+  });
+
+  it("shows a placeholder while the branch is still the temporary one", () => {
+    expect(
+      workspaceDisplayLabel({ worktreePath: "/w/noah-1a2b3c4d", branch: "noah/1a2b3c4d" }),
+    ).toBe(UNNAMED_WORKSPACE_LABEL);
+  });
+
+  it("strips the worktree namespace from generated branch names", () => {
+    expect(
+      workspaceDisplayLabel({ worktreePath: "/w/noah-1a2b3c4d", branch: "noah/fix-tab-widths" }),
+    ).toBe("fix-tab-widths");
+  });
+
+  it("shows other branches as-is", () => {
+    expect(workspaceDisplayLabel({ worktreePath: "/w/pr-123", branch: "feature/dark-mode" })).toBe(
+      "feature/dark-mode",
+    );
+  });
+
+  it("falls back to the directory basename when the branch is unknown", () => {
+    expect(
+      workspaceDisplayLabel({ worktreePath: "/repos/app/.worktrees/feature-x", branch: null }),
+    ).toBe("feature-x");
+  });
 });
 
 describe("workspaceGroupRepresentative", () => {
@@ -115,6 +159,72 @@ describe("workspaceGroupRepresentative", () => {
     ]);
     const group = groups[0];
     expect(group && workspaceGroupRepresentative(group)?.id).toBe("fresh");
+  });
+});
+
+describe("buildSidebarWorkspaceGroups", () => {
+  const projectRefs = [{ environmentId: env, projectId: project }];
+
+  function makeDraft(input: {
+    draftId: string;
+    worktreePath?: string | null;
+    branch?: string | null;
+    createdAt?: string;
+  }): WorkspaceDraftInput {
+    return {
+      draftId: input.draftId,
+      environmentId: env,
+      projectId: project,
+      worktreePath: input.worktreePath ?? null,
+      branch: input.branch ?? null,
+      createdAt: input.createdAt ?? "2026-01-01T00:00:00.000Z",
+    };
+  }
+
+  it("always includes a main workspace row, pinned to the bottom, even with no threads", () => {
+    const groups = buildSidebarWorkspaceGroups({ threads: [], drafts: [], projectRefs });
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.worktreePath).toBeNull();
+    expect(groups[0]?.label).toBe(MAIN_WORKSPACE_LABEL);
+    expect(groups[0]?.threads).toEqual([]);
+    expect(groups[0]?.draftIds).toEqual([]);
+  });
+
+  it("keeps a worktree workspace alive from a draft-only tab, above main", () => {
+    const groups = buildSidebarWorkspaceGroups({
+      threads: [],
+      drafts: [makeDraft({ draftId: "d1", worktreePath: "/w/feature", branch: "feature/login" })],
+      projectRefs,
+    });
+    expect(groups.map((group) => group.worktreePath)).toEqual(["/w/feature", null]);
+    const workspace = groups[0];
+    expect(workspace?.threads).toEqual([]);
+    expect(workspace?.draftIds).toEqual(["d1"]);
+    expect(workspace?.label).toBe("feature/login");
+  });
+
+  it("merges draft tabs into a workspace that also has live threads", () => {
+    const groups = buildSidebarWorkspaceGroups({
+      threads: [makeThread({ id: "t1", worktreePath: "/w/feature" })],
+      drafts: [makeDraft({ draftId: "d1", worktreePath: "/w/feature" })],
+      projectRefs,
+    });
+    const workspace = groups.find((group) => group.worktreePath === "/w/feature");
+    expect(workspace?.threads.map((thread) => thread.id)).toEqual(["t1"]);
+    expect(workspace?.draftIds).toEqual(["d1"]);
+  });
+
+  it("orders worktrees by recency and never puts main above a worktree", () => {
+    const groups = buildSidebarWorkspaceGroups({
+      threads: [
+        makeThread({ id: "m", worktreePath: null, updatedAt: "2026-05-01T00:00:00.000Z" }),
+        makeThread({ id: "old", worktreePath: "/w/old", updatedAt: "2026-01-01T00:00:00.000Z" }),
+        makeThread({ id: "new", worktreePath: "/w/new", updatedAt: "2026-03-01T00:00:00.000Z" }),
+      ],
+      drafts: [],
+      projectRefs,
+    });
+    expect(groups.map((group) => group.worktreePath)).toEqual(["/w/new", "/w/old", null]);
   });
 });
 

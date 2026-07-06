@@ -12,17 +12,23 @@ import { useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo, useRef } from "react";
 
 import { getFallbackThreadIdAfterDelete } from "../components/Sidebar.logic";
-import { useComposerDraftStore } from "../composerDraftStore";
+import { useComposerDraftStore, workspaceDraftSessions } from "../composerDraftStore";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
 import { readLocalApi } from "../localApi";
-import { readEnvironmentThreadRefs, readProject, readThreadShell } from "../state/entities";
+import {
+  readEnvironmentThreadRefs,
+  readEnvironmentThreadShells,
+  readProject,
+  readThreadShell,
+} from "../state/entities";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
+import { workspaceThreads } from "../worktreeGrouping";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useClientSettings } from "./useSettings";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -105,9 +111,21 @@ export function useThreadActions() {
       }
 
       const currentRouteThreadRef = getCurrentRouteThreadRef();
-      const shouldNavigateToDraft =
+      const isArchivingActiveTab =
         currentRouteThreadRef?.threadId === threadRef.threadId &&
         currentRouteThreadRef.environmentId === threadRef.environmentId;
+      // Snapshot the workspace tab order before the archive removes the
+      // thread from the projection.
+      const workspace = {
+        environmentId: threadRef.environmentId,
+        projectId: thread.projectId,
+        worktreePath: thread.worktreePath ?? null,
+      };
+      const workspaceTabs = workspaceThreads(
+        readEnvironmentThreadShells(threadRef.environmentId),
+        workspace,
+      );
+      const archivedIndex = workspaceTabs.findIndex((tab) => tab.id === threadRef.threadId);
       const archiveResult = await archiveThreadMutation({
         environmentId: threadRef.environmentId,
         input: { threadId: threadRef.threadId },
@@ -116,9 +134,39 @@ export function useThreadActions() {
         return archiveResult;
       }
 
-      if (shouldNavigateToDraft) {
+      if (isArchivingActiveTab) {
+        // Chrome-style: activate the tab to the right (draft tabs sit after
+        // the thread tabs), else the one to the left. Archiving the last tab
+        // keeps you in the workspace by opening a fresh draft tab there.
+        const nextThread = archivedIndex === -1 ? undefined : workspaceTabs[archivedIndex + 1];
+        const firstDraft = workspaceDraftSessions(
+          useComposerDraftStore.getState().draftThreadsByThreadKey,
+          workspace,
+        )[0];
+        const previousThread = archivedIndex > 0 ? workspaceTabs[archivedIndex - 1] : undefined;
+        const neighborThread = nextThread ?? (firstDraft ? undefined : previousThread);
         const navigationResult = await settlePromise(() =>
-          handleNewThreadRef.current(scopeProjectRef(thread.environmentId, thread.projectId)),
+          neighborThread
+            ? router.navigate({
+                to: "/$environmentId/$threadId",
+                params: buildThreadRouteParams(
+                  scopeThreadRef(neighborThread.environmentId, neighborThread.id),
+                ),
+              })
+            : firstDraft
+              ? router.navigate({
+                  to: "/draft/$draftId",
+                  params: { draftId: firstDraft.draftId },
+                })
+              : handleNewThreadRef.current(
+                  scopeProjectRef(thread.environmentId, thread.projectId),
+                  {
+                    branch: thread.branch ?? null,
+                    worktreePath: thread.worktreePath ?? null,
+                    envMode: thread.worktreePath ? "worktree" : "local",
+                    forceNew: true,
+                  },
+                ),
         );
         if (navigationResult._tag === "Failure") {
           return navigationResult;
@@ -130,7 +178,7 @@ export function useThreadActions() {
       refreshArchivedThreadsForEnvironment(threadRef.environmentId);
       return archiveResult;
     },
-    [archiveThreadMutation, getCurrentRouteThreadRef, resolveThreadTarget],
+    [archiveThreadMutation, getCurrentRouteThreadRef, resolveThreadTarget, router],
   );
 
   const unarchiveThread = useCallback(

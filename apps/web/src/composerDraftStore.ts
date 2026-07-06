@@ -55,9 +55,10 @@ import { ReviewCommentContextSchema, type ReviewCommentContext } from "./reviewC
 const isRuntimeMode = Schema.is(RuntimeMode);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 const isReviewCommentContext = Schema.is(ReviewCommentContextSchema);
+const isModelSelection = Schema.is(ModelSelection);
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
-const COMPOSER_DRAFT_STORAGE_VERSION = 8;
+const COMPOSER_DRAFT_STORAGE_VERSION = 9;
 const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
 export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
 
@@ -125,9 +126,23 @@ const PersistedElementContextDraft = Schema.Struct({
 });
 type PersistedElementContextDraft = typeof PersistedElementContextDraft.Type;
 
+// Queued follow-up messages persist their editable text and the model/runtime/
+// interaction snapshot only. Image blobs and volatile contexts (terminal text,
+// element picks) are intentionally dropped on persist — mirroring how the live
+// composer draft treats them — so a reload keeps the queued text but not blobs.
+const PersistedQueuedMessage = Schema.Struct({
+  id: Schema.String,
+  text: Schema.String,
+  modelSelection: Schema.optionalKey(ModelSelection),
+  runtimeMode: Schema.optionalKey(RuntimeMode),
+  interactionMode: Schema.optionalKey(ProviderInteractionMode),
+});
+type PersistedQueuedMessage = typeof PersistedQueuedMessage.Type;
+
 const PersistedComposerThreadDraftState = Schema.Struct({
   prompt: Schema.String,
   attachments: Schema.Array(PersistedComposerImageAttachment),
+  queuedMessages: Schema.optionalKey(Schema.Array(PersistedQueuedMessage)),
   terminalContexts: Schema.optionalKey(Schema.Array(PersistedTerminalContextDraft)),
   elementContexts: Schema.optionalKey(Schema.Array(PersistedElementContextDraft)),
   previewAnnotations: Schema.optionalKey(Schema.Array(PreviewAnnotationPayloadSchema)),
@@ -244,12 +259,33 @@ const PersistedComposerDraftStoreStorage = Schema.Struct({
 });
 
 /**
+ * A follow-up message staged (via Tab/Enter) while the agent is working. Queued
+ * messages are auto-sent one turn at a time, in order, once the agent goes idle.
+ * The full send snapshot is captured so the flush reproduces the send faithfully;
+ * only `text` is user-editable in the queue UI.
+ */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  images: ComposerImageAttachment[];
+  terminalContexts: TerminalContextDraft[];
+  elementContexts: ElementContextDraft[];
+  previewAnnotations: PreviewAnnotationPayload[];
+  reviewComments: ReviewCommentContext[];
+  modelSelection: ModelSelection | null;
+  runtimeMode: RuntimeMode | null;
+  interactionMode: ProviderInteractionMode | null;
+}
+
+/**
  * Composer content keyed by either a draft session (`DraftId`) or a real server
  * thread (`ScopedThreadRef`). This is the editable payload shown in the composer.
  */
 export interface ComposerThreadDraftState {
   prompt: string;
   images: ComposerImageAttachment[];
+  /** Follow-up messages staged while the agent is busy (see {@link QueuedMessage}). */
+  queuedMessages: QueuedMessage[];
   nonPersistedImageIds: string[];
   persistedAttachments: PersistedComposerImageAttachment[];
   terminalContexts: TerminalContextDraft[];
@@ -303,7 +339,7 @@ export type DraftThreadState = DraftSessionState;
 /**
  * Draft session metadata paired with its stable draft-session identity.
  */
-interface ProjectDraftSession extends DraftSessionState {
+export interface ProjectDraftSession extends DraftSessionState {
   draftId: DraftId;
 }
 
@@ -327,6 +363,11 @@ type ComposerThreadTarget = ScopedThreadRef | DraftId;
 interface ComposerDraftStoreState {
   draftsByThreadKey: Record<string, ComposerThreadDraftState>;
   draftThreadsByThreadKey: Record<string, DraftThreadState>;
+  /**
+   * Most recently touched draft per logical project. Several unpromoted
+   * drafts can coexist for one project (each is a workspace tab); this
+   * mapping only decides which one project-level entry points reuse.
+   */
   logicalProjectDraftThreadKeyByLogicalProjectKey: Record<string, string>;
   stickyModelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
   stickyActiveProvider: ProviderInstanceId | null;
@@ -480,6 +521,23 @@ interface ComposerDraftStoreState {
     comments: ReadonlyArray<ReviewCommentContext>,
   ) => void;
   removeReviewComment: (threadRef: ComposerThreadTarget, commentId: string) => void;
+  /** Append a follow-up message to the thread's send queue. */
+  enqueueMessage: (threadRef: ComposerThreadTarget, message: QueuedMessage) => void;
+  /** Replace the queue (used to reorder). */
+  setQueuedMessages: (
+    threadRef: ComposerThreadTarget,
+    messages: ReadonlyArray<QueuedMessage>,
+  ) => void;
+  removeQueuedMessage: (threadRef: ComposerThreadTarget, messageId: string) => void;
+  /** Edit a queued message's text in place. */
+  updateQueuedMessage: (
+    threadRef: ComposerThreadTarget,
+    messageId: string,
+    text: string,
+  ) => void;
+  clearQueuedMessages: (threadRef: ComposerThreadTarget) => void;
+  /** Remove and return the head of the queue (used by the auto-flush). */
+  dequeueMessage: (threadRef: ComposerThreadTarget) => QueuedMessage | null;
   clearPersistedAttachments: (threadRef: ComposerThreadTarget) => void;
   syncPersistedAttachments: (
     threadRef: ComposerThreadTarget,
@@ -558,6 +616,8 @@ const EMPTY_TERMINAL_CONTEXTS: TerminalContextDraft[] = [];
 const EMPTY_ELEMENT_CONTEXTS: ElementContextDraft[] = [];
 const EMPTY_PREVIEW_ANNOTATIONS: PreviewAnnotationPayload[] = [];
 const EMPTY_REVIEW_COMMENTS: ReviewCommentContext[] = [];
+const EMPTY_QUEUED_MESSAGES: QueuedMessage[] = [];
+Object.freeze(EMPTY_QUEUED_MESSAGES);
 Object.freeze(EMPTY_IMAGES);
 Object.freeze(EMPTY_IDS);
 Object.freeze(EMPTY_PERSISTED_ATTACHMENTS);
@@ -574,6 +634,7 @@ const EMPTY_COMPOSER_DRAFT_MODEL_STATE = Object.freeze<ComposerDraftModelState>(
 const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   prompt: "",
   images: EMPTY_IMAGES,
+  queuedMessages: EMPTY_QUEUED_MESSAGES,
   nonPersistedImageIds: EMPTY_IDS,
   persistedAttachments: EMPTY_PERSISTED_ATTACHMENTS,
   terminalContexts: EMPTY_TERMINAL_CONTEXTS,
@@ -596,6 +657,7 @@ export function createEmptyThreadDraft(): ComposerThreadDraftState {
   return {
     prompt: "",
     images: [],
+    queuedMessages: [],
     nonPersistedImageIds: [],
     persistedAttachments: [],
     terminalContexts: [],
@@ -670,6 +732,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
   return (
     draft.prompt.length === 0 &&
     draft.images.length === 0 &&
+    draft.queuedMessages.length === 0 &&
     draft.persistedAttachments.length === 0 &&
     draft.terminalContexts.length === 0 &&
     draft.elementContexts.length === 0 &&
@@ -1294,10 +1357,6 @@ function getComposerDraftState(
   return state.draftsByThreadKey[threadKey] ?? null;
 }
 
-function isComposerThreadKeyInUse(mappings: Record<string, string>, threadKey: string): boolean {
-  return Object.values(mappings).includes(threadKey);
-}
-
 function toProjectDraftSession(
   draftId: DraftId,
   draftSession: DraftSessionState,
@@ -1606,6 +1665,34 @@ function normalizePersistedDraftThreads(
   return { draftThreadsByThreadKey, logicalProjectDraftThreadKeyByLogicalProjectKey };
 }
 
+function normalizePersistedQueuedMessage(
+  entry: unknown,
+): DeepMutable<PersistedQueuedMessage> | null {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const candidate = entry as Partial<PersistedQueuedMessage>;
+  if (typeof candidate.id !== "string" || candidate.id.length === 0) {
+    return null;
+  }
+  if (typeof candidate.text !== "string") {
+    return null;
+  }
+  const interactionMode =
+    candidate.interactionMode === "plan" || candidate.interactionMode === "default"
+      ? candidate.interactionMode
+      : undefined;
+  return {
+    id: candidate.id,
+    text: candidate.text,
+    ...(candidate.modelSelection && isModelSelection(candidate.modelSelection)
+      ? { modelSelection: cloneModelSelection(candidate.modelSelection) }
+      : {}),
+    ...(isRuntimeMode(candidate.runtimeMode) ? { runtimeMode: candidate.runtimeMode } : {}),
+    ...(interactionMode ? { interactionMode } : {}),
+  };
+}
+
 function normalizePersistedDraftsByThreadId(
   rawDraftMap: unknown,
   draftThreadsByThreadKey: PersistedComposerDraftStoreState["draftThreadsByThreadKey"],
@@ -1659,6 +1746,12 @@ function normalizePersistedDraftsByThreadId(
       : [];
     const reviewComments = Array.isArray(draftCandidate.reviewComments)
       ? draftCandidate.reviewComments.filter(isReviewCommentContext)
+      : [];
+    const queuedMessages = Array.isArray(draftCandidate.queuedMessages)
+      ? draftCandidate.queuedMessages.flatMap((entry) => {
+          const normalized = normalizePersistedQueuedMessage(entry);
+          return normalized ? [normalized] : [];
+        })
       : [];
     const runtimeMode = isRuntimeMode(draftCandidate.runtimeMode)
       ? draftCandidate.runtimeMode
@@ -1725,6 +1818,7 @@ function normalizePersistedDraftsByThreadId(
       terminalContexts.length === 0 &&
       elementContexts.length === 0 &&
       reviewComments.length === 0 &&
+      queuedMessages.length === 0 &&
       !hasModelData &&
       !runtimeMode &&
       !interactionMode
@@ -1746,6 +1840,7 @@ function normalizePersistedDraftsByThreadId(
     nextDraftsByThreadKey[normalizedThreadKey] = {
       prompt,
       attachments,
+      ...(queuedMessages.length > 0 ? { queuedMessages } : {}),
       ...(terminalContexts.length > 0 ? { terminalContexts } : {}),
       ...(elementContexts.length > 0 ? { elementContexts } : {}),
       ...(reviewComments.length > 0 ? { reviewComments } : {}),
@@ -1830,6 +1925,7 @@ function partializeComposerDraftStoreState(
     if (
       draft.prompt.length === 0 &&
       draft.persistedAttachments.length === 0 &&
+      draft.queuedMessages.length === 0 &&
       draft.terminalContexts.length === 0 &&
       draft.elementContexts.length === 0 &&
       draft.previewAnnotations.length === 0 &&
@@ -1843,6 +1939,19 @@ function partializeComposerDraftStoreState(
     const persistedDraft: DeepMutable<PersistedComposerThreadDraftState> = {
       prompt: draft.prompt,
       attachments: draft.persistedAttachments,
+      ...(draft.queuedMessages.length > 0
+        ? {
+            queuedMessages: draft.queuedMessages.map((message) => ({
+              id: message.id,
+              text: message.text,
+              ...(message.modelSelection
+                ? { modelSelection: cloneModelSelection(message.modelSelection) }
+                : {}),
+              ...(message.runtimeMode ? { runtimeMode: message.runtimeMode } : {}),
+              ...(message.interactionMode ? { interactionMode: message.interactionMode } : {}),
+            })),
+          }
+        : {}),
       ...(draft.terminalContexts.length > 0
         ? {
             terminalContexts: draft.terminalContexts.map((context) => ({
@@ -2114,6 +2223,21 @@ function toHydratedThreadDraft(
   return {
     prompt: persistedDraft.prompt,
     images: hydrateImagesFromPersisted(persistedDraft.attachments),
+    // Blobs and volatile contexts aren't persisted for queued messages, so a
+    // rehydrated queue carries text (+ model snapshot) but empty attachments.
+    queuedMessages:
+      persistedDraft.queuedMessages?.map((message) => ({
+        id: message.id,
+        text: message.text,
+        images: [],
+        terminalContexts: [],
+        elementContexts: [],
+        previewAnnotations: [],
+        reviewComments: [],
+        modelSelection: message.modelSelection ?? null,
+        runtimeMode: message.runtimeMode ?? null,
+        interactionMode: message.interactionMode ?? null,
+      })) ?? [],
     nonPersistedImageIds: [],
     persistedAttachments: [...persistedDraft.attachments],
     terminalContexts:
@@ -2267,32 +2391,14 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               ...state.logicalProjectDraftThreadKeyByLogicalProjectKey,
               [normalizedLogicalProjectKey]: draftId,
             };
+            // Remapping intentionally keeps the previously mapped draft
+            // alive: every unpromoted draft stays open as its own workspace
+            // tab until it is promoted or explicitly closed.
             const nextDraftThreadsByThreadKey: Record<string, DraftThreadState> = {
               ...state.draftThreadsByThreadKey,
               [draftId]: nextDraftThread,
             };
-            let nextDraftsByThreadKey = state.draftsByThreadKey;
-            const previousDraftThread =
-              previousThreadKeyForLogicalProject === undefined
-                ? undefined
-                : nextDraftThreadsByThreadKey[previousThreadKeyForLogicalProject];
-            if (
-              previousThreadKeyForLogicalProject &&
-              previousThreadKeyForLogicalProject !== draftId &&
-              !isComposerThreadKeyInUse(
-                nextLogicalProjectDraftThreadKeyByLogicalProjectKey,
-                previousThreadKeyForLogicalProject,
-              ) &&
-              !isDraftThreadPromoting(previousDraftThread)
-            ) {
-              delete nextDraftThreadsByThreadKey[previousThreadKeyForLogicalProject];
-              if (state.draftsByThreadKey[previousThreadKeyForLogicalProject] !== undefined) {
-                nextDraftsByThreadKey = { ...state.draftsByThreadKey };
-                delete nextDraftsByThreadKey[previousThreadKeyForLogicalProject];
-              }
-            }
             return {
-              draftsByThreadKey: nextDraftsByThreadKey,
               draftThreadsByThreadKey: nextDraftThreadsByThreadKey,
               logicalProjectDraftThreadKeyByLogicalProjectKey:
                 nextLogicalProjectDraftThreadKeyByLogicalProjectKey,
@@ -2396,15 +2502,24 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
         },
         clearProjectDraftThreadId: (projectRef) => {
           set((state) => {
-            const matchingThreadEntry = Object.entries(state.draftThreadsByThreadKey).find(
-              ([, draftThread]) =>
-                draftThread.projectId === projectRef.projectId &&
-                draftThread.environmentId === projectRef.environmentId,
-            );
-            if (!matchingThreadEntry) {
+            const matchingThreadKeys = Object.entries(state.draftThreadsByThreadKey)
+              .filter(
+                ([, draftThread]) =>
+                  draftThread.projectId === projectRef.projectId &&
+                  draftThread.environmentId === projectRef.environmentId,
+              )
+              .map(([threadKey]) => threadKey);
+            if (matchingThreadKeys.length === 0) {
               return state;
             }
-            return removeDraftThreadReferences(state, matchingThreadEntry[0]);
+            return matchingThreadKeys.reduce<
+              Pick<
+                ComposerDraftStoreState,
+                | "draftThreadsByThreadKey"
+                | "draftsByThreadKey"
+                | "logicalProjectDraftThreadKeyByLogicalProjectKey"
+              >
+            >((nextState, threadKey) => removeDraftThreadReferences(nextState, threadKey), state);
           });
         },
         clearProjectDraftThreadById: (projectRef, threadRef) => {
@@ -3251,6 +3366,107 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return { draftsByThreadKey: nextDraftsByThreadKey };
           });
         },
+        enqueueMessage: (threadRef, message) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey || message.text.trim().length === 0) return;
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            const queuedMessages = existing.queuedMessages.filter(
+              (entry) => entry.id !== message.id,
+            );
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: {
+                  ...existing,
+                  queuedMessages: [...queuedMessages, message],
+                },
+              },
+            };
+          });
+        },
+        setQueuedMessages: (threadRef, messages) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return;
+          const queuedMessages = messages.map((message) => ({ ...message }));
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            const nextDraft = { ...existing, queuedMessages };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) delete nextDraftsByThreadKey[threadKey];
+            else nextDraftsByThreadKey[threadKey] = nextDraft;
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        removeQueuedMessage: (threadRef, messageId) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey || !messageId) return;
+          set((state) => {
+            const current = state.draftsByThreadKey[threadKey];
+            if (!current) return state;
+            const queuedMessages = current.queuedMessages.filter(
+              (entry) => entry.id !== messageId,
+            );
+            if (queuedMessages.length === current.queuedMessages.length) return state;
+            const nextDraft = { ...current, queuedMessages };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) delete nextDraftsByThreadKey[threadKey];
+            else nextDraftsByThreadKey[threadKey] = nextDraft;
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        updateQueuedMessage: (threadRef, messageId, text) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey || !messageId) return;
+          set((state) => {
+            const current = state.draftsByThreadKey[threadKey];
+            if (!current) return state;
+            let changed = false;
+            const queuedMessages = current.queuedMessages.map((entry) => {
+              if (entry.id !== messageId || entry.text === text) return entry;
+              changed = true;
+              return { ...entry, text };
+            });
+            if (!changed) return state;
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: { ...current, queuedMessages },
+              },
+            };
+          });
+        },
+        clearQueuedMessages: (threadRef) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return;
+          set((state) => {
+            const current = state.draftsByThreadKey[threadKey];
+            if (!current || current.queuedMessages.length === 0) return state;
+            const nextDraft = { ...current, queuedMessages: [] };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) delete nextDraftsByThreadKey[threadKey];
+            else nextDraftsByThreadKey[threadKey] = nextDraft;
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        dequeueMessage: (threadRef) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return null;
+          const current = get().draftsByThreadKey[threadKey];
+          const head = current?.queuedMessages[0];
+          if (!current || !head) return null;
+          set((state) => {
+            const latest = state.draftsByThreadKey[threadKey];
+            if (!latest) return state;
+            const queuedMessages = latest.queuedMessages.filter((entry) => entry.id !== head.id);
+            const nextDraft = { ...latest, queuedMessages };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) delete nextDraftsByThreadKey[threadKey];
+            else nextDraftsByThreadKey[threadKey] = nextDraft;
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+          return head;
+        },
         clearPersistedAttachments: (threadRef) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
@@ -3432,6 +3648,65 @@ export function useComposerThreadDraft(threadRef: ComposerThreadTarget): Compose
   return useComposerDraftStore((state) => {
     return getComposerDraftState(state, threadRef) ?? EMPTY_THREAD_DRAFT;
   });
+}
+
+/**
+ * Unpromoted draft sessions of one workspace in tab order (oldest first),
+ * mirroring `workspaceThreads` for real threads. Promoting drafts are
+ * excluded — their tab is already represented by the materializing thread.
+ */
+export function workspaceDraftSessions(
+  draftThreadsByThreadKey: Record<string, DraftThreadState>,
+  target: {
+    environmentId: EnvironmentId;
+    projectId: ProjectId;
+    worktreePath: string | null;
+  },
+): ProjectDraftSession[] {
+  return Object.entries(draftThreadsByThreadKey)
+    .filter(
+      ([, draftThread]) =>
+        !isDraftThreadPromoting(draftThread) &&
+        draftThread.environmentId === target.environmentId &&
+        draftThread.projectId === target.projectId &&
+        (draftThread.worktreePath ?? null) === (target.worktreePath ?? null),
+    )
+    .map(([threadKey, draftThread]) => toProjectDraftSession(DraftId.make(threadKey), draftThread))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.draftId.localeCompare(b.draftId));
+}
+
+/**
+ * All non-promoting draft sessions belonging to any of the given project refs,
+ * across every worktree. Used by the sidebar to keep a workspace (and the repo
+ * root) visible while it holds only a draft tab. Oldest first.
+ */
+export function projectDraftSessions(
+  draftThreadsByThreadKey: Record<string, DraftThreadState>,
+  projectRefs: readonly { environmentId: EnvironmentId; projectId: ProjectId }[],
+): ProjectDraftSession[] {
+  const refKeys = new Set(projectRefs.map((ref) => `${ref.environmentId} ${ref.projectId}`));
+  return Object.entries(draftThreadsByThreadKey)
+    .filter(
+      ([, draftThread]) =>
+        !isDraftThreadPromoting(draftThread) &&
+        refKeys.has(`${draftThread.environmentId} ${draftThread.projectId}`),
+    )
+    .map(([threadKey, draftThread]) => toProjectDraftSession(DraftId.make(threadKey), draftThread))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.draftId.localeCompare(b.draftId));
+}
+
+export function useWorkspaceDraftSessions(target: {
+  environmentId: EnvironmentId;
+  projectId: ProjectId;
+  worktreePath: string | null;
+}): ProjectDraftSession[] {
+  const { environmentId, projectId, worktreePath } = target;
+  const draftThreadsByThreadKey = useComposerDraftStore((state) => state.draftThreadsByThreadKey);
+  return useMemo(
+    () =>
+      workspaceDraftSessions(draftThreadsByThreadKey, { environmentId, projectId, worktreePath }),
+    [draftThreadsByThreadKey, environmentId, projectId, worktreePath],
+  );
 }
 
 export function useComposerDraftModelState(

@@ -47,6 +47,13 @@ export function useNewThreadHandler() {
         worktreePath?: string | null;
         envMode?: DraftThreadEnvMode;
         startFromOrigin?: boolean;
+        /**
+         * Always open another empty draft tab instead of reusing the
+         * project's existing one (the chrome Cmd+T idiom). Navigation-style
+         * entry points (open project, archive fallback) leave this unset so
+         * they land on the already-open draft.
+         */
+        forceNew?: boolean;
       },
     ): Promise<void> => {
       const {
@@ -88,7 +95,7 @@ export function useNewThreadHandler() {
           ? getDraftThread(currentRouteTarget.threadRef)
           : getDraftSession(currentRouteTarget.draftId)
         : null;
-      if (reusableStoredDraftThread) {
+      if (reusableStoredDraftThread && options?.forceNew !== true) {
         return (async () => {
           if (
             hasBranchOption ||
@@ -125,6 +132,7 @@ export function useNewThreadHandler() {
       }
 
       if (
+        options?.forceNew !== true &&
         latestActiveDraftThread &&
         currentRouteTarget?.kind === "draft" &&
         latestActiveDraftThread.logicalProjectKey === logicalProjectKey &&

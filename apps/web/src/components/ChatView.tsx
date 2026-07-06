@@ -14,7 +14,6 @@ import {
   type ScopedThreadRef,
   type ThreadId,
   type TurnId,
-  type KeybindingCommand,
   OrchestrationThreadActivity,
   ProviderInteractionMode,
   ProviderDriverKind,
@@ -62,7 +61,6 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
@@ -141,13 +139,8 @@ import { ChevronDownIcon, TriangleAlertIcon, WifiOffIcon } from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybindings";
 import { type NewProjectScriptInput } from "./ProjectScriptsControl";
-import {
-  commandForProjectScript,
-  nextProjectScriptId,
-  projectScriptIdFromCommand,
-} from "~/projectScripts";
+import { projectScriptIdFromCommand } from "~/projectScripts";
 import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
 import { useEnvironmentSettings } from "../hooks/useSettings";
@@ -164,6 +157,7 @@ import {
   type DraftThreadEnvMode,
   useComposerDraftStore,
   type DraftId,
+  type QueuedMessage,
 } from "../composerDraftStore";
 import {
   appendTerminalContextsToPrompt,
@@ -181,13 +175,9 @@ import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../revi
 import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
-import { projectEnvironment } from "../state/projects";
+import { useProjectScriptActions } from "../hooks/useProjectScriptActions";
 import { useEnvironmentQuery } from "../state/query";
-import {
-  primaryServerAvailableEditorsAtom,
-  primaryServerKeybindingsAtom,
-  serverEnvironment,
-} from "../state/server";
+import { primaryServerAvailableEditorsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
@@ -220,6 +210,7 @@ import {
   buildExpiredTerminalContextToastCopy,
   buildLocalDraftThread,
   buildThreadTurnInterruptInput,
+  canFlushQueue,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
@@ -996,10 +987,6 @@ function ChatViewContent(props: ChatViewProps) {
     [environmentId, threadId],
   );
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
-  const updateProject = useAtomCommand(projectEnvironment.update, { reportFailure: false });
-  const upsertKeybinding = useAtomCommand(serverEnvironment.upsertKeybinding, {
-    reportFailure: false,
-  });
   const openTerminal = useAtomCommand(terminalEnvironment.open, "terminal open");
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
@@ -1079,6 +1066,11 @@ function ChatViewContent(props: ChatViewProps) {
     (store) => store.setInteractionMode,
   );
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
+  const enqueueComposerMessage = useComposerDraftStore((store) => store.enqueueMessage);
+  const dequeueComposerMessage = useComposerDraftStore((store) => store.dequeueMessage);
+  const queuedMessageCount = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.queuedMessages.length ?? 0,
+  );
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const getDraftSessionByLogicalProjectKey = useComposerDraftStore(
     (store) => store.getDraftSessionByLogicalProjectKey,
@@ -2579,82 +2571,15 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
-  const persistProjectScripts = useCallback(
-    async (input: {
-      projectId: ProjectId;
-      projectCwd: string;
-      previousScripts: ReadonlyArray<ProjectScript>;
-      nextScripts: ReadonlyArray<ProjectScript>;
-      keybinding?: string | null;
-      keybindingCommand: KeybindingCommand;
-    }): Promise<AtomCommandResult<void, unknown>> => {
-      const updateResult = mapAtomCommandResult(
-        await updateProject({
-          environmentId,
-          input: {
-            projectId: input.projectId,
-            scripts: input.nextScripts,
-          },
-        }),
-        () => undefined,
-      );
-      if (updateResult._tag === "Failure") {
-        return updateResult;
-      }
-
-      const keybindingRule = decodeProjectScriptKeybindingRule({
-        keybinding: input.keybinding,
-        command: input.keybindingCommand,
-      });
-
-      if (isElectron && keybindingRule) {
-        return mapAtomCommandResult(
-          await upsertKeybinding({
-            environmentId,
-            input: keybindingRule,
-          }),
-          () => undefined,
-        );
-      }
-      return updateResult;
-    },
-    [environmentId, updateProject, upsertKeybinding],
-  );
+  const projectScriptActions = useProjectScriptActions();
   const saveProjectScript = useCallback(
     async (input: NewProjectScriptInput): Promise<AtomCommandResult<void, unknown>> => {
       if (!activeProject) {
         return AsyncResult.success(undefined);
       }
-      const nextId = nextProjectScriptId(
-        input.name,
-        activeProject.scripts.map((script) => script.id),
-      );
-      const nextScript: ProjectScript = {
-        id: nextId,
-        name: input.name,
-        command: input.command,
-        icon: input.icon,
-        runOnWorktreeCreate: input.runOnWorktreeCreate,
-      };
-      const nextScripts = input.runOnWorktreeCreate
-        ? [
-            ...activeProject.scripts.map((script) =>
-              script.runOnWorktreeCreate ? { ...script, runOnWorktreeCreate: false } : script,
-            ),
-            nextScript,
-          ]
-        : [...activeProject.scripts, nextScript];
-
-      return persistProjectScripts({
-        projectId: activeProject.id,
-        projectCwd: activeProject.workspaceRoot,
-        previousScripts: activeProject.scripts,
-        nextScripts,
-        keybinding: input.keybinding,
-        keybindingCommand: commandForProjectScript(nextId),
-      });
+      return projectScriptActions.addScript(activeProject, input);
     },
-    [activeProject, persistProjectScripts],
+    [activeProject, projectScriptActions],
   );
   const updateProjectScript = useCallback(
     async (
@@ -2664,72 +2589,18 @@ function ChatViewContent(props: ChatViewProps) {
       if (!activeProject) {
         return AsyncResult.success(undefined);
       }
-      const existingScript = activeProject.scripts.find((script) => script.id === scriptId);
-      if (!existingScript) {
-        return AsyncResult.failure(Cause.fail(new Error("Script not found.")));
-      }
-
-      const updatedScript: ProjectScript = {
-        ...existingScript,
-        name: input.name,
-        command: input.command,
-        icon: input.icon,
-        runOnWorktreeCreate: input.runOnWorktreeCreate,
-      };
-      const nextScripts = activeProject.scripts.map((script) =>
-        script.id === scriptId
-          ? updatedScript
-          : input.runOnWorktreeCreate
-            ? { ...script, runOnWorktreeCreate: false }
-            : script,
-      );
-
-      return persistProjectScripts({
-        projectId: activeProject.id,
-        projectCwd: activeProject.workspaceRoot,
-        previousScripts: activeProject.scripts,
-        nextScripts,
-        keybinding: input.keybinding,
-        keybindingCommand: commandForProjectScript(scriptId),
-      });
+      return projectScriptActions.updateScript(activeProject, scriptId, input);
     },
-    [activeProject, persistProjectScripts],
+    [activeProject, projectScriptActions],
   );
   const deleteProjectScript = useCallback(
     async (scriptId: string): Promise<AtomCommandResult<void, unknown>> => {
       if (!activeProject) {
         return AsyncResult.success(undefined);
       }
-      const nextScripts = activeProject.scripts.filter((script) => script.id !== scriptId);
-
-      const deletedName = activeProject.scripts.find((s) => s.id === scriptId)?.name;
-
-      const result = await persistProjectScripts({
-        projectId: activeProject.id,
-        projectCwd: activeProject.workspaceRoot,
-        previousScripts: activeProject.scripts,
-        nextScripts,
-        keybinding: null,
-        keybindingCommand: commandForProjectScript(scriptId),
-      });
-      if (result._tag === "Success") {
-        toastManager.add({
-          type: "success",
-          title: `Deleted action "${deletedName ?? "Unknown"}"`,
-        });
-      } else if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not delete action",
-            description: error instanceof Error ? error.message : "An unexpected error occurred.",
-          }),
-        );
-      }
-      return result;
+      return projectScriptActions.deleteScript(activeProject, scriptId);
     },
-    [activeProject, persistProjectScripts],
+    [activeProject, projectScriptActions],
   );
 
   const handleRuntimeModeChange = useCallback(
@@ -4264,6 +4135,68 @@ function ChatViewContent(props: ChatViewProps) {
     }
   };
 
+  // Tab stages the composed message into the per-thread queue (Enter sends
+  // normally). Queued items are auto-sent one turn at a time whenever no turn is
+  // running — see the flush effect below. Works whether the agent is busy or
+  // idle; when idle the flush picks it up immediately.
+  const onQueueMessage = () => {
+    if (!activeThread || activePendingProgress || showPlanFollowUpPrompt) return;
+    // Nothing running and nothing already queued → send immediately, exactly as
+    // Enter would. Only stage into the queue when a turn is active or the queue
+    // already has items that must drain first (so order is preserved).
+    const canSendImmediately =
+      queuedMessageCount === 0 &&
+      !sendInFlightRef.current &&
+      canFlushQueue({
+        latestTurnSettled,
+        isWorking,
+        hasPendingApproval: activePendingApproval !== null,
+        hasPendingUserInput: activePendingProgress !== null,
+        hasPlanFollowUp: showPlanFollowUpPrompt,
+        environmentUnavailable: Boolean(activeEnvironmentUnavailable),
+      });
+    if (canSendImmediately) {
+      void onSend();
+      return;
+    }
+    const sendCtx = composerRef.current?.getSendContext();
+    if (!sendCtx) return;
+    const {
+      images: composerImages,
+      terminalContexts: composerTerminalContexts,
+      elementContexts: composerElementContexts,
+      previewAnnotations: composerPreviewAnnotations,
+      reviewComments: composerReviewComments,
+      selectedModelSelection: ctxSelectedModelSelection,
+    } = sendCtx;
+    const promptForSend = promptRef.current;
+    const { sendableTerminalContexts, hasSendableContent } = deriveComposerSendState({
+      prompt: promptForSend,
+      imageCount: composerImages.length,
+      terminalContexts: composerTerminalContexts,
+      elementContextCount:
+        composerElementContexts.length +
+        composerPreviewAnnotations.length +
+        composerReviewComments.length,
+    });
+    if (!hasSendableContent) return;
+    enqueueComposerMessage(composerDraftTarget, {
+      id: newMessageId(),
+      text: promptForSend,
+      images: [...composerImages],
+      terminalContexts: [...sendableTerminalContexts],
+      elementContexts: [...composerElementContexts],
+      previewAnnotations: [...composerPreviewAnnotations],
+      reviewComments: [...composerReviewComments],
+      modelSelection: ctxSelectedModelSelection ?? null,
+      runtimeMode,
+      interactionMode,
+    });
+    promptRef.current = "";
+    clearComposerDraftContent(composerDraftTarget);
+    composerRef.current?.resetCursorState();
+  };
+
   const onInterrupt = async () => {
     if (!activeThread) return;
     const result = await interruptThreadTurn({
@@ -4278,6 +4211,210 @@ function ChatViewContent(props: ChatViewProps) {
       );
     }
   };
+
+  // Auto-send the head of the thread's message queue. Queued flushes always
+  // target an already-started server thread (the agent was running when the
+  // message was staged), so this is a trimmed `onSend` with no first-message /
+  // worktree bootstrap and no composer read — the payload comes from the item.
+  const dispatchQueuedMessage = async () => {
+    if (routeKind !== "server" || !isServerThread || !activeThread || !activeProject) return;
+    if (sendInFlightRef.current) return;
+    if (
+      !canFlushQueue({
+        latestTurnSettled,
+        isWorking,
+        hasPendingApproval: activePendingApproval !== null,
+        hasPendingUserInput: activePendingProgress !== null,
+        hasPlanFollowUp: showPlanFollowUpPrompt,
+        environmentUnavailable: Boolean(activeEnvironmentUnavailable),
+      })
+    ) {
+      return;
+    }
+    const item = dequeueComposerMessage(composerDraftTarget);
+    if (!item) return;
+
+    sendInFlightRef.current = true;
+    beginLocalDispatch();
+
+    const threadIdForSend = activeThread.id;
+    const imagesSnapshot = [...item.images];
+    const messageTextWithContexts = appendElementContextsToPrompt(
+      appendTerminalContextsToPrompt(item.text, item.terminalContexts),
+      item.elementContexts,
+    );
+    const messageTextWithPreviewAnnotations = item.previewAnnotations.reduce(
+      (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
+      messageTextWithContexts,
+    );
+    const messageTextForSend = appendReviewCommentsToPrompt(
+      messageTextWithPreviewAnnotations,
+      item.reviewComments,
+    );
+    const outgoingMessageText = messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT;
+    const messageIdForSend = newMessageId();
+    const messageCreatedAt = new Date().toISOString();
+    const modelSelectionForSend = item.modelSelection ?? activeThread.modelSelection;
+    const runtimeModeForSend = item.runtimeMode ?? runtimeMode;
+    const interactionModeForSend = item.interactionMode ?? interactionMode;
+
+    const turnAttachmentsPromise = Promise.all(
+      imagesSnapshot.map(async (image) => ({
+        type: "image" as const,
+        name: image.name,
+        mimeType: image.mimeType,
+        sizeBytes: image.sizeBytes,
+        dataUrl: await readFileAsDataUrl(image.file),
+      })),
+    );
+    const optimisticAttachments = imagesSnapshot.map((image) => ({
+      type: "image" as const,
+      id: image.id,
+      name: image.name,
+      mimeType: image.mimeType,
+      sizeBytes: image.sizeBytes,
+      previewUrl: image.previewUrl,
+    }));
+
+    isAtEndRef.current = true;
+    timelineScrollModeRef.current = "anchoring-new-turn";
+    liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
+    pendingTimelineAnchorRef.current = messageIdForSend;
+    activeTimelineAnchorIndexRef.current = null;
+    showScrollDebouncer.current.cancel();
+    setShowScrollToBottom(false);
+    setTimelineAnchor({
+      threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, threadIdForSend)),
+      messageId: messageIdForSend,
+    });
+    setOptimisticUserMessages((existing) => [
+      ...existing,
+      {
+        id: messageIdForSend,
+        role: "user",
+        text: outgoingMessageText,
+        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+        turnId: null,
+        createdAt: messageCreatedAt,
+        updatedAt: messageCreatedAt,
+        streaming: false,
+      },
+    ]);
+    setThreadError(threadIdForSend, null);
+
+    let failure: AtomCommandResult<unknown, unknown> | null = null;
+    const settingsResult = await persistThreadSettingsForNextTurn({
+      threadId: threadIdForSend,
+      createdAt: messageCreatedAt,
+      ...(item.modelSelection ? { modelSelection: modelSelectionForSend } : {}),
+      runtimeMode: runtimeModeForSend,
+      interactionMode: interactionModeForSend,
+    });
+    if (settingsResult._tag === "Failure") {
+      failure = settingsResult;
+    }
+
+    const turnAttachmentsResult = await settlePromise(() => turnAttachmentsPromise);
+    if (failure === null && turnAttachmentsResult._tag === "Failure") {
+      failure = turnAttachmentsResult;
+    }
+
+    let turnStartSucceeded = false;
+    if (failure === null && turnAttachmentsResult._tag === "Success") {
+      const startResult = await startThreadTurn({
+        environmentId,
+        input: {
+          threadId: threadIdForSend,
+          message: {
+            messageId: messageIdForSend,
+            role: "user",
+            text: outgoingMessageText,
+            attachments: turnAttachmentsResult.value,
+          },
+          modelSelection: modelSelectionForSend,
+          titleSeed: truncate(item.text || "Queued message"),
+          runtimeMode: runtimeModeForSend,
+          interactionMode: interactionModeForSend,
+          createdAt: messageCreatedAt,
+        },
+      });
+      if (startResult._tag === "Failure") {
+        failure = startResult;
+      } else {
+        turnStartSucceeded = true;
+      }
+    }
+
+    if (failure !== null) {
+      setOptimisticUserMessages((existing) => {
+        const removed = existing.filter((message) => message.id === messageIdForSend);
+        for (const message of removed) {
+          revokeUserMessagePreviewUrls(message);
+        }
+        const next = existing.filter((message) => message.id !== messageIdForSend);
+        return next.length === existing.length ? existing : next;
+      });
+      if (!isAtomCommandInterrupted(failure)) {
+        const error = squashAtomCommandFailure(failure);
+        setThreadError(
+          threadIdForSend,
+          error instanceof Error ? error.message : "Failed to send queued message.",
+        );
+      }
+      // Best-effort recovery: drop the failed item back into the composer if it
+      // is empty, so the text isn't silently lost. Avoid re-queuing to prevent a
+      // retry loop with the flush effect.
+      if (promptRef.current.length === 0) {
+        promptRef.current = item.text;
+        setComposerDraftPrompt(composerDraftTarget, item.text);
+        composerRef.current?.resetCursorState({
+          cursor: collapseExpandedComposerCursor(item.text, item.text.length),
+          prompt: item.text,
+          detectTrigger: true,
+        });
+      }
+    }
+    sendInFlightRef.current = false;
+    if (!turnStartSucceeded) {
+      resetLocalDispatch();
+    }
+  };
+
+  // Drain the queue one turn at a time. Fires on the working→idle edge (turn
+  // settles) and whenever the queue length changes while idle. `sendInFlightRef`
+  // and the `canFlushQueue` re-check inside `dispatchQueuedMessage` guard against
+  // double-dispatch during the async gap before `isSendBusy` flips true.
+  useEffect(() => {
+    if (routeKind !== "server" || queuedMessageCount === 0 || sendInFlightRef.current) {
+      return;
+    }
+    if (
+      !canFlushQueue({
+        latestTurnSettled,
+        isWorking,
+        hasPendingApproval: activePendingApproval !== null,
+        hasPendingUserInput: activePendingProgress !== null,
+        hasPlanFollowUp: showPlanFollowUpPrompt,
+        environmentUnavailable: Boolean(activeEnvironmentUnavailable),
+      })
+    ) {
+      return;
+    }
+    void dispatchQueuedMessage();
+    // dispatchQueuedMessage is intentionally excluded — it is redefined every
+    // render; the reactive inputs below fully determine when a flush should run.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    routeKind,
+    queuedMessageCount,
+    phase,
+    latestTurnSettled,
+    isWorking,
+    activePendingApproval,
+    activePendingProgress,
+    showPlanFollowUpPrompt,
+    activeEnvironmentUnavailable,
+  ]);
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
@@ -5229,6 +5366,7 @@ function ChatViewContent(props: ChatViewProps) {
                       composerTerminalContextsRef={composerTerminalContextsRef}
                       composerElementContextsRef={composerElementContextsRef}
                       onSend={onSend}
+                      onQueue={onQueueMessage}
                       onInterrupt={onInterrupt}
                       onImplementPlanInNewThread={onImplementPlanInNewThread}
                       onRespondToApproval={onRespondToApproval}

@@ -7,6 +7,7 @@ import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   buildExpiredTerminalContextToastCopy,
   buildThreadTurnInterruptInput,
+  canFlushQueue,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   getStartedThreadModelChangeBlockReason,
@@ -452,5 +453,32 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingApproval: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingUserInput: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, threadError: "failed" })).toBe(true);
+  });
+});
+
+describe("canFlushQueue", () => {
+  const idle = {
+    latestTurnSettled: true,
+    isWorking: false,
+    hasPendingApproval: false,
+    hasPendingUserInput: false,
+    hasPlanFollowUp: false,
+    environmentUnavailable: false,
+  };
+
+  it("flushes whenever there is no running task", () => {
+    expect(canFlushQueue(idle)).toBe(true);
+  });
+
+  it("holds while the agent is working or the latest turn is unsettled", () => {
+    expect(canFlushQueue({ ...idle, isWorking: true })).toBe(false);
+    expect(canFlushQueue({ ...idle, latestTurnSettled: false })).toBe(false);
+  });
+
+  it("holds while a modal composer flow owns the input", () => {
+    expect(canFlushQueue({ ...idle, hasPendingApproval: true })).toBe(false);
+    expect(canFlushQueue({ ...idle, hasPendingUserInput: true })).toBe(false);
+    expect(canFlushQueue({ ...idle, hasPlanFollowUp: true })).toBe(false);
+    expect(canFlushQueue({ ...idle, environmentUnavailable: true })).toBe(false);
   });
 });

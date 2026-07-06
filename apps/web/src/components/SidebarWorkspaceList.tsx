@@ -3,17 +3,21 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectId, ScopedThreadRef } from "@t3tools/contracts";
 import { GitBranchIcon } from "lucide-react";
 import { memo, useCallback, useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { cn } from "~/lib/utils";
+import type { DraftId } from "~/composerDraftStore";
 import type { SidebarThreadSummary } from "~/types";
 import { useUiStateStore } from "~/uiStateStore";
 import {
-  buildWorkspaceGroups,
+  buildSidebarWorkspaceGroups,
+  UNNAMED_WORKSPACE_LABEL,
+  type WorkspaceDraftInput,
   workspaceGroupRepresentative,
+  type SidebarWorkspaceGroup,
   type WorkspaceGroup,
 } from "~/worktreeGrouping";
 import { resolveProjectStatusIndicator, resolveThreadStatusPill } from "./Sidebar.logic";
@@ -25,23 +29,34 @@ const SIDEBAR_ICON_ACTION_BUTTON_CLASS =
 
 export interface SidebarWorkspaceListProps {
   projectThreads: readonly SidebarThreadSummary[];
+  projectRefs: readonly { environmentId: EnvironmentId; projectId: ProjectId }[];
+  draftSessions: readonly WorkspaceDraftInput[];
   projectExpanded: boolean;
   activeRouteThreadKey: string | null;
+  activeDraftId: DraftId | null;
   newThreadShortcutLabel: string | null;
   navigateToThread: (threadRef: ScopedThreadRef) => void;
+  navigateToDraft: (draftId: DraftId) => void;
   onNewThreadInWorkspace: (group: WorkspaceGroup<SidebarThreadSummary>) => void;
   attachWorkspaceListAutoAnimateRef: (node: HTMLElement | null) => void;
 }
 
 const SidebarWorkspaceRow = memo(function SidebarWorkspaceRow(props: {
-  group: WorkspaceGroup<SidebarThreadSummary>;
+  group: SidebarWorkspaceGroup<SidebarThreadSummary>;
   isActive: boolean;
   newThreadShortcutLabel: string | null;
   navigateToThread: (threadRef: ScopedThreadRef) => void;
+  navigateToDraft: (draftId: DraftId) => void;
   onNewThreadInWorkspace: (group: WorkspaceGroup<SidebarThreadSummary>) => void;
 }) {
-  const { group, isActive, newThreadShortcutLabel, navigateToThread, onNewThreadInWorkspace } =
-    props;
+  const {
+    group,
+    isActive,
+    newThreadShortcutLabel,
+    navigateToThread,
+    navigateToDraft,
+    onNewThreadInWorkspace,
+  } = props;
   const threadKeys = useMemo(
     () =>
       group.threads.map((thread) =>
@@ -73,9 +88,18 @@ const SidebarWorkspaceRow = memo(function SidebarWorkspaceRow(props: {
 
   const handleClick = useCallback(() => {
     const representative = workspaceGroupRepresentative(group);
-    if (!representative) return;
-    navigateToThread(scopeThreadRef(representative.environmentId, representative.id));
-  }, [group, navigateToThread]);
+    if (representative) {
+      navigateToThread(scopeThreadRef(representative.environmentId, representative.id));
+      return;
+    }
+    const firstDraftId = group.draftIds[0];
+    if (firstDraftId) {
+      navigateToDraft(firstDraftId as DraftId);
+      return;
+    }
+    // Empty workspace (e.g. an untouched repo root): open a fresh draft in it.
+    onNewThreadInWorkspace(group);
+  }, [group, navigateToDraft, navigateToThread, onNewThreadInWorkspace]);
 
   const handleNewThread = useCallback(
     (event: React.MouseEvent) => {
@@ -94,23 +118,34 @@ const SidebarWorkspaceRow = memo(function SidebarWorkspaceRow(props: {
         onClick={handleClick}
         className="h-8 w-full translate-x-0 justify-start gap-2 px-2 pr-8"
       >
-        {status ? (
-          <span
-            aria-label={status.label}
-            className={cn(
-              "size-1.5 shrink-0 rounded-full",
-              status.dotClass,
-              status.pulse && "animate-pulse",
-            )}
-          />
-        ) : (
-          <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
-        )}
+        {/* Fixed-size slot: the status dot and branch icon differ in size, so
+            swapping them bare would shift the workspace label sideways. */}
+        <span className="flex size-3.5 shrink-0 items-center justify-center">
+          {status ? (
+            <span
+              aria-label={status.label}
+              className={cn(
+                "size-1.5 rounded-full",
+                status.dotClass,
+                status.pulse && "animate-pulse",
+              )}
+            />
+          ) : (
+            <GitBranchIcon className="size-3.5 text-muted-foreground/60" />
+          )}
+        </span>
         <span className="flex min-w-0 flex-1 items-center gap-2">
-          <span className="truncate text-xs text-foreground/90">{group.label}</span>
-          {group.threads.length > 1 ? (
+          <span
+            className={cn(
+              "truncate text-xs text-foreground/90",
+              group.label === UNNAMED_WORKSPACE_LABEL && "italic text-muted-foreground",
+            )}
+          >
+            {group.label}
+          </span>
+          {group.threads.length + group.draftIds.length > 1 ? (
             <span className="shrink-0 text-[10px] text-muted-foreground/60">
-              {group.threads.length}
+              {group.threads.length + group.draftIds.length}
             </span>
           ) : null}
         </span>
@@ -150,14 +185,26 @@ export const SidebarWorkspaceList = memo(function SidebarWorkspaceList(
 ) {
   const {
     projectThreads,
+    projectRefs,
+    draftSessions,
     projectExpanded,
     activeRouteThreadKey,
+    activeDraftId,
     newThreadShortcutLabel,
     navigateToThread,
+    navigateToDraft,
     onNewThreadInWorkspace,
     attachWorkspaceListAutoAnimateRef,
   } = props;
-  const groups = useMemo(() => buildWorkspaceGroups(projectThreads), [projectThreads]);
+  const groups = useMemo(
+    () =>
+      buildSidebarWorkspaceGroups({
+        threads: projectThreads,
+        drafts: draftSessions,
+        projectRefs,
+      }),
+    [draftSessions, projectRefs, projectThreads],
+  );
 
   if (!projectExpanded) {
     return null;
@@ -181,7 +228,9 @@ export const SidebarWorkspaceList = memo(function SidebarWorkspaceList(
             scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
           ),
         );
-        const isActive = activeRouteThreadKey !== null && groupThreadKeys.has(activeRouteThreadKey);
+        const isActive =
+          (activeRouteThreadKey !== null && groupThreadKeys.has(activeRouteThreadKey)) ||
+          (activeDraftId !== null && group.draftIds.includes(activeDraftId));
         return (
           <SidebarWorkspaceRow
             key={group.key}
@@ -189,6 +238,7 @@ export const SidebarWorkspaceList = memo(function SidebarWorkspaceList(
             isActive={isActive}
             newThreadShortcutLabel={newThreadShortcutLabel}
             navigateToThread={navigateToThread}
+            navigateToDraft={navigateToDraft}
             onNewThreadInWorkspace={onNewThreadInWorkspace}
           />
         );
