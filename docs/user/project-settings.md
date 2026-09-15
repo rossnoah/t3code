@@ -38,6 +38,15 @@ checkouts and removal. Actions belong to a project: editing them creates the pro
 on each selected environment, and reset returns to the environment's shared list. A project's
 `t3.json` actions can be imported there.
 
+To save a reusable prompt, choose **Add action** at the top of a thread or in
+**Settings → Project → Actions**, select **Prompt**, and enter a name and message.
+For example, name it “Update Linear ticket” and ask the agent to update the ticket
+with a summary of the work in the thread. Running it sends the saved message to the
+current thread using its selected agent and permissions, leaving your composer draft
+and attachments unchanged. The agent needs access to any service the prompt asks it
+to use. You can edit or delete the action in Settings and assign a keyboard shortcut.
+On mobile, saved actions are available in the thread's terminal menu.
+
 For workspace mode, a project's `t3.json` preference applies when the project has no override.
 Browser access changes apply when an agent session next starts.
 

@@ -33,19 +33,30 @@ export function ProjectActionsList({
           <span className="flex min-w-0 items-center gap-2">
             <ScriptIcon icon={script.icon} className="size-4 shrink-0 text-muted-foreground" />
             <span className="min-w-0 truncate">{script.name}</span>
+            {script.kind === "prompt" && (
+              <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-[11px] font-normal text-muted-foreground">
+                prompt
+              </span>
+            )}
             {script.runOnWorktreeCreate ? (
               <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-[11px] font-normal text-muted-foreground">
                 setup
               </span>
             ) : null}
-            {script.previewUrl ? (
+            {script.kind !== "prompt" && script.previewUrl ? (
               <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-[11px] font-normal text-muted-foreground max-sm:hidden">
                 preview · desktop only
               </span>
             ) : null}
           </span>
         }
-        description={<code className="block max-w-full truncate font-mono">{script.command}</code>}
+        description={
+          script.kind === "prompt" ? (
+            <span className="block max-w-full truncate">{script.prompt}</span>
+          ) : (
+            <code className="block max-w-full truncate font-mono">{script.command}</code>
+          )
+        }
         control={
           <>
             {shortcutLabel ? (
