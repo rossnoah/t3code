@@ -63,6 +63,7 @@ jobs:
       UPSTREAM_TAG: ${{ needs.plan.outputs.upstream_tag }}
       UPSTREAM_URL: ${{ needs.plan.outputs.upstream_url }}
       FORK_SHA: ${{ github.sha }}
+      BUILD_TARGET: ${{ github.event_name == 'push' && 'zip' || 'dmg' }}
     steps:
       - name: Check signing configuration
         env:
@@ -101,6 +102,12 @@ jobs:
           git merge --no-edit "$UPSTREAM_SHA"
           git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/fork-source.tar.gz"
 
+      - name: Configure download caches
+        run: |
+          echo "ELECTRON_CACHE=$RUNNER_TEMP/electron-cache" >> "$GITHUB_ENV"
+          echo "electron_config_cache=$RUNNER_TEMP/electron-cache" >> "$GITHUB_ENV"
+          echo "ELECTRON_BUILDER_CACHE=$RUNNER_TEMP/electron-builder-cache" >> "$GITHUB_ENV"
+
       - name: Set up Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
         with:
@@ -108,23 +115,43 @@ jobs:
           cache: true
           run-install: false
 
+      - name: Cache Electron and packaging downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ runner.temp }}/electron-cache
+            ${{ runner.temp }}/electron-builder-cache
+          key: fork-electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/package.json', 'pnpm-lock.yaml') }}
+          restore-keys: fork-electron-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Install build dependencies
         run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
 
-      - name: Check fork behavior and packaging
+      - name: Resolve native build toolchain
+        id: toolchain
         run: |
-          node --test .github/scripts/fork-nightly.test.cjs
-          vp test run packages/shared/src/git.test.ts packages/shared/src/projectSettings.test.ts packages/contracts/src/settings.test.ts apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts apps/server/src/orchestration/Layers/CheckpointReactor.test.ts apps/web/src/components/GitActionsControl.logic.test.ts scripts/build-desktop-artifact.test.ts
-          vp test run apps/server/src/server.test.ts -t 'bootstraps first-send worktree turns'
+          echo "rust=$(rustc --version | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "sdk=$(xcrun --show-sdk-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache resource monitor
+        id: resource_monitor_cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: native/resource-monitor/target/aarch64-apple-darwin/release/t3-resource-monitor
+          key: fork-resource-monitor-arm64-${{ steps.toolchain.outputs.rust }}-${{ steps.toolchain.outputs.sdk }}-${{ hashFiles('native/resource-monitor/**', '.cargo/**') }}
 
       - name: Set nightly version
         run: node scripts/update-release-package-versions.ts "$VERSION"
 
-      - name: Build, sign and notarize Apple Silicon app
+      - name: Compile desktop, server and web
+        run: vp run build:desktop
+
+      - name: Package signed app and check fork behavior in parallel
         env:
           T3CODE_DESKTOP_UPDATE_REPOSITORY: rossnoah/t3code
           T3CODE_DESKTOP_APP_ID: com.rossnoah.t3code
           T3CODE_DESKTOP_MAC_PASSKEYS: "false"
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: ${{ steps.resource_monitor_cache.outputs.cache-hit == 'true' }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
@@ -137,7 +164,7 @@ jobs:
           printf '%s' "$APPLE_API_KEY" > "$key_path"
           export APPLE_API_KEY="$key_path"
           trap 'rm -f "$key_path"' EXIT
-          vp run dist:desktop:artifact --platform mac --arch arm64 --target dmg --signed --build-version "$VERSION"
+          node .github/scripts/build-fork-nightly.cjs
 
       - name: Verify signing, notarization and update feed
         run: |
@@ -166,16 +193,22 @@ jobs:
             `Upstream nightly: ${process.env.UPSTREAM_URL}`,
             `Fork changes: https://github.com/rossnoah/t3code/commit/${process.env.FORK_SHA}`,
             "",
-            "Download the arm64 DMG for the initial install. In-app nightly updates use this fork.",
+            process.env.BUILD_TARGET === "dmg"
+              ? "Download the arm64 DMG for the initial install. In-app nightly updates use this fork."
+              : "This release provides the ZIP used by in-app updates. For a fresh install, unzip it and move the app to Applications. DMG installers are produced by scheduled or manual builds.",
             "The fork-source.tar.gz attachment contains the combined build source. GitHub's automatic source archives contain only the fork commit.",
             "",
             sourceMarker(process.env.FORK_SHA, process.env.UPSTREAM_SHA),
           ].join('\n');
           fs.writeFileSync(`${process.env.RUNNER_TEMP}/fork-release-notes.md`, body);
           NODE
+          artifacts=(release/*.zip release/*.blockmap release/nightly-mac.yml)
+          if [[ "$BUILD_TARGET" == dmg ]]; then
+            artifacts+=(release/*.dmg)
+          fi
           gh release create "v$VERSION" \
             --repo rossnoah/t3code --target "$FORK_SHA" --prerelease --latest=false \
             --title "Noah's T3 Code $VERSION" \
             --notes-file "$RUNNER_TEMP/fork-release-notes.md" \
-            release/*.dmg release/*.zip release/*.blockmap release/nightly-mac.yml \
+            "${artifacts[@]}" \
             "$RUNNER_TEMP/fork-source.tar.gz"
