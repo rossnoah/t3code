@@ -167,6 +167,7 @@ describe("ProviderCommandReactor", () => {
   });
 
   async function createHarness(input?: {
+    readonly settings?: Parameters<typeof ServerSettingsService.layerTest>[0];
     readonly baseDir?: string;
     readonly initialTitle?: string;
     readonly deferReactorStart?: boolean;
@@ -490,7 +491,7 @@ describe("ProviderCommandReactor", () => {
           generateThreadTitle,
         }),
       ),
-      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(ServerSettingsService.layerTest(input?.settings)),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
@@ -2536,8 +2537,19 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: prompt });
   });
 
-  it("generates a worktree branch name for the first turn", async () => {
-    const harness = await createHarness();
+  it.each([
+    { settings: {}, expectedBranch: "t3code/fix-reconnect" },
+    { settings: { branchPrefix: "noah/" }, expectedBranch: "noah/fix-reconnect" },
+    {
+      settings: {
+        branchPrefix: "team/",
+        projectSettingsOverrides: { "project-1": { branchPrefix: "noah/" } },
+      },
+      expectedBranch: "noah/fix-reconnect",
+    },
+    { settings: { branchPrefix: "" }, expectedBranch: "fix-reconnect" },
+  ])("generates $expectedBranch for the first turn", async ({ settings, expectedBranch }) => {
+    const harness = await createHarness({ settings });
     const now = "2026-01-01T00:00:00.000Z";
     const prompt = `Add a safer reconnect backoff. ${serializeAssistantCitation(assistantCitation)}`;
     const statusRefreshed = await harness.runEffect(Deferred.make<void>());
@@ -2556,19 +2568,8 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    harness.generateBranchName.mockImplementation((input: unknown) =>
-      Effect.succeed({
-        branch:
-          typeof input === "object" &&
-          input !== null &&
-          "modelSelection" in input &&
-          typeof input.modelSelection === "object" &&
-          input.modelSelection !== null &&
-          "model" in input.modelSelection &&
-          typeof input.modelSelection.model === "string"
-            ? `feature/${input.modelSelection.model}`
-            : "feature/generated",
-      }),
+    harness.generateBranchName.mockImplementation(() =>
+      Effect.succeed({ branch: "t3code/fix-reconnect" }),
     );
 
     await harness.runEffect(
@@ -2595,7 +2596,15 @@ describe("ProviderCommandReactor", () => {
     );
     expect(harness.generateBranchName.mock.calls[0]?.[0].message).not.toContain("t3-citation://");
     expect(harness.refreshStatus.mock.calls[0]?.[0]).toBe("/tmp/provider-project-worktree");
+    expect(harness.renameBranch).toHaveBeenCalledWith({
+      cwd: "/tmp/provider-project-worktree",
+      oldBranch: "t3code/1234abcd",
+      newBranch: expectedBranch,
+    });
     const readModel = await harness.readModel();
+    expect(readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.branch).toBe(
+      expectedBranch,
+    );
     expect(
       readModel.threads
         .find((entry) => entry.id === ThreadId.make("thread-1"))
