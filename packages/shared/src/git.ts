@@ -18,6 +18,8 @@ export const WORKTREE_BRANCH_PREFIX = "t3code";
 const TEMP_WORKTREE_BRANCH_PATTERN = new RegExp(
   `^${WORKTREE_BRANCH_PREFIX}\\/(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$`,
 );
+// The marker keeps custom-prefix placeholders recognizable after settings change.
+const CUSTOM_TEMP_WORKTREE_BRANCH_PATTERN = /^(?:[a-z0-9_-]+\/)*worktree-[0-9a-f]{8}$/;
 
 /**
  * Sanitize an arbitrary string into a valid, lowercase git refName fragment.
@@ -126,10 +128,9 @@ export function buildGeneratedWorktreeBranchName(
   return `${normalizedPrefix}${safeFragment}`;
 }
 
-// Temporary names keep a stable namespace so changing settings cannot prevent
-// unfinished branches from being recognized and renamed on another client.
 export function buildTemporaryWorktreeBranchName(
   randomHex: (byteLength: number) => string,
+  prefix = `${WORKTREE_BRANCH_PREFIX}/`,
 ): string {
   // Normalize to exactly 8 lowercase hex chars so a UUID-shaped callback
   // still produces the canonical temporary branch form.
@@ -137,11 +138,26 @@ export function buildTemporaryWorktreeBranchName(
     .toLowerCase()
     .replace(/[^0-9a-f]/g, "")
     .slice(0, 8);
-  return `${WORKTREE_BRANCH_PREFIX}/${token}`;
+  const normalizedPrefix = normalizeBranchPrefix(prefix);
+  return normalizedPrefix === `${WORKTREE_BRANCH_PREFIX}/`
+    ? `${normalizedPrefix}${token}`
+    : `${normalizedPrefix}worktree-${token}`;
 }
 
 export function isTemporaryWorktreeBranch(refName: string): boolean {
-  return TEMP_WORKTREE_BRANCH_PATTERN.test(refName.trim().toLowerCase());
+  const normalized = refName.trim().toLowerCase();
+  return (
+    TEMP_WORKTREE_BRANCH_PATTERN.test(normalized) ||
+    CUSTOM_TEMP_WORKTREE_BRANCH_PATTERN.test(normalized)
+  );
+}
+
+/** Apply server settings to client-generated placeholders without changing explicit names. */
+export function applyTemporaryWorktreeBranchPrefix(branch: string, prefix: string): string {
+  if (!isTemporaryWorktreeBranch(branch)) return branch;
+  const fragment = branch.trim().toLowerCase().split("/").at(-1)!;
+  const token = fragment.replace(/^worktree-/, "");
+  return buildTemporaryWorktreeBranchName(() => token, prefix);
 }
 
 /**
