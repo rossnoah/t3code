@@ -4132,6 +4132,7 @@ export default function ChatView(props: ChatViewProps) {
       writeTerminal,
     ],
   );
+  const onSendRef = useRef<typeof onSend | null>(null);
   const runProjectScript = useCallback(
     async (
       script: ProjectScript,
@@ -4149,6 +4150,10 @@ export default function ChatView(props: ChatViewProps) {
           if (current[activeProject.id] === script.id) return current;
           return { ...current, [activeProject.id]: script.id };
         });
+      }
+      if (script.kind === "prompt") {
+        await onSendRef.current?.(undefined, "foreground", undefined, undefined, script.prompt);
+        return;
       }
       const targetCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
       const baseTerminalId =
@@ -4363,7 +4368,7 @@ export default function ChatView(props: ChatViewProps) {
       const nextScripts = activeProjectScripts.map((script) =>
         script.id === scriptId
           ? updatedScript
-          : input.runOnWorktreeCreate
+          : input.runOnWorktreeCreate && script.runOnWorktreeCreate
             ? { ...script, runOnWorktreeCreate: false }
             : script,
       );
@@ -6791,7 +6796,7 @@ export default function ChatView(props: ChatViewProps) {
       if (!script) return;
       event.preventDefault();
       event.stopPropagation();
-      void runProjectScript(script);
+      if (!event.repeat) void runProjectScript(script);
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
@@ -7102,6 +7107,7 @@ export default function ChatView(props: ChatViewProps) {
     },
     /** A queued message being sent now instead of the live composer draft. */
     queuedMessage?: QueuedComposerMessage,
+    actionPrompt?: string,
   ) => {
     e?.preventDefault();
     // Typed out in full rather than picked from the menu. Attachments or contexts
@@ -7111,6 +7117,7 @@ export default function ChatView(props: ChatViewProps) {
       usageLimitsKey !== null &&
       !directAnnotation &&
       !queuedMessage &&
+      actionPrompt === undefined &&
       !composerHasNonPromptContent &&
       isUsageLimitsCommand(promptRef.current)
     ) {
@@ -7122,7 +7129,18 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
-    const notifyDirectAnnotationAttached = () => {
+    const notifyUnavailableDirectSend = () => {
+      if (actionPrompt !== undefined) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Prompt action not sent",
+            description:
+              "Sending is unavailable right now. Finish the current action, then try again.",
+          }),
+        );
+        return;
+      }
       if (!directAnnotation) return;
       toastManager.add(
         stackedThreadToast({
@@ -7142,7 +7160,7 @@ export default function ChatView(props: ChatViewProps) {
       sendInFlightRef.current ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
     ) {
-      notifyDirectAnnotationAttached();
+      notifyUnavailableDirectSend();
       return;
     }
     if (needsLoadBalancing) {
@@ -7174,8 +7192,8 @@ export default function ChatView(props: ChatViewProps) {
     if (activePendingProgress) {
       // A queued message waits until the question is answered; it must not
       // be submitted as the answer.
-      if (directAnnotation || queuedMessage) {
-        notifyDirectAnnotationAttached();
+      if (directAnnotation || queuedMessage || actionPrompt !== undefined) {
+        notifyUnavailableDirectSend();
         return;
       }
       onAdvanceActivePendingUserInput();
@@ -7183,7 +7201,7 @@ export default function ChatView(props: ChatViewProps) {
     }
     const sendCtx = composerRef.current?.getSendContext();
     if (!sendCtx?.providerAvailable) {
-      notifyDirectAnnotationAttached();
+      notifyUnavailableDirectSend();
       return;
     }
     const {
@@ -7192,7 +7210,16 @@ export default function ChatView(props: ChatViewProps) {
       terminalContexts: composerTerminalContexts,
       previewAnnotations: sendContextPreviewAnnotations,
       reviewComments: composerReviewComments,
-    } = queuedMessage ?? sendCtx;
+    } = queuedMessage ??
+    (actionPrompt === undefined
+      ? sendCtx
+      : {
+          images: [],
+          files: [],
+          terminalContexts: [],
+          previewAnnotations: [],
+          reviewComments: [],
+        });
     const {
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
@@ -7238,11 +7265,12 @@ export default function ChatView(props: ChatViewProps) {
     // must be in the text now, not after the next render.
     const promptForSend = queuedMessage
       ? queuedMessage.prompt
-      : directAnnotation
-        ? ensureInlineContextReferences(promptRef.current, [
-            previewAnnotationContextReference(directAnnotation.annotation),
-          ])
-        : promptRef.current;
+      : (actionPrompt ??
+        (directAnnotation
+          ? ensureInlineContextReferences(promptRef.current, [
+              previewAnnotationContextReference(directAnnotation.annotation),
+            ])
+          : promptRef.current));
     const {
       trimmedPrompt: trimmed,
       sendableTerminalContexts: sendableComposerTerminalContexts,
@@ -7255,6 +7283,7 @@ export default function ChatView(props: ChatViewProps) {
       elementContextCount: composerPreviewAnnotations.length + composerReviewComments.length,
     });
     const feedbackCommand =
+      actionPrompt === undefined &&
       ctxSelectedProvider === "codex" &&
       composerImages.length === 0 &&
       composerFiles.length === 0 &&
@@ -7315,6 +7344,7 @@ export default function ChatView(props: ChatViewProps) {
     if (
       !directAnnotation &&
       !queuedMessage &&
+      actionPrompt === undefined &&
       sendInteractionModeEnabled &&
       showPlanFollowUpPrompt &&
       activeProposedPlan &&
@@ -7378,6 +7408,7 @@ export default function ChatView(props: ChatViewProps) {
     }
     // Providers without the legacy toggle receive their native commands unchanged.
     const standaloneSlashCommand =
+      actionPrompt === undefined &&
       sendInteractionModeEnabled &&
       composerImages.length === 0 &&
       composerFiles.length === 0 &&
@@ -7445,15 +7476,17 @@ export default function ChatView(props: ChatViewProps) {
         submissionIntent,
         createdAt: new Date().toISOString(),
       });
-      promptRef.current = "";
-      // Attachments move with the message; their uploads stay pending. The
-      // refs clear now too, so a Stop before the composer's sync effect runs
-      // does not restore the moved attachments twice.
-      composerImagesRef.current = [];
-      composerFilesRef.current = [];
-      composerTerminalContextsRef.current = [];
-      clearComposerDraftContent(composerDraftTarget);
-      composerRef.current?.resetCursorState();
+      if (actionPrompt === undefined) {
+        promptRef.current = "";
+        // Attachments move with the message; their uploads stay pending. The
+        // refs clear now too, so a Stop before the composer's sync effect runs
+        // does not restore the moved attachments twice.
+        composerImagesRef.current = [];
+        composerFilesRef.current = [];
+        composerTerminalContextsRef.current = [];
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+      }
       return;
     }
     const threadIdForSend = activeThread.id;
@@ -7735,7 +7768,7 @@ export default function ChatView(props: ChatViewProps) {
         }),
       );
     }
-    if (!queuedMessage) {
+    if (!queuedMessage && actionPrompt === undefined) {
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
@@ -7974,6 +8007,11 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     if (failure !== null) {
+      if (actionPrompt !== undefined) {
+        setOptimisticUserMessages((existing) =>
+          existing.filter((message) => message.id !== messageIdForSend),
+        );
+      }
       if (resolvedSubmissionIntent === "background" && draftId && draftThread) {
         restoreFailedBackgroundDraftThread(
           draftId,
@@ -8002,7 +8040,8 @@ export default function ChatView(props: ChatViewProps) {
           });
         }
       } else if (
-        backgroundDraftOpened
+        actionPrompt === undefined &&
+        (backgroundDraftOpened
           ? !composerDraftHasUserContent(
               useComposerDraftStore.getState().getComposerDraft(composerDraftTarget),
             )
@@ -8013,7 +8052,7 @@ export default function ChatView(props: ChatViewProps) {
             (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
               ?.previewAnnotations.length ?? 0) === 0 &&
             (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.reviewComments
-              .length ?? 0) === 0
+              .length ?? 0) === 0)
       ) {
         setOptimisticUserMessages((existing) => {
           const removed = existing.filter((message) => message.id === messageIdForSend);
@@ -8852,7 +8891,6 @@ export default function ChatView(props: ChatViewProps) {
       setWorkLocallyResendDraftId(draftId);
     })();
   }, [cancelWorktreeSetup, draftId, routeThreadRef.environmentId, worktreeSetup]);
-  const onSendRef = useRef(onSend);
   onSendRef.current = onSend;
   // Resend once the cancelled dispatch has settled and the composer is free.
   // Every state that makes `onSend` bail and wait is part of the readiness
@@ -8887,7 +8925,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     setWorkLocallyResendDraftId(null);
-    void onSendRef.current();
+    void onSendRef.current?.();
   }, [
     composerDraftTarget,
     routeThreadKey,
