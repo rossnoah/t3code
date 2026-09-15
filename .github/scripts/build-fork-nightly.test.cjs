@@ -63,3 +63,19 @@ test("process errors and nonzero exits fail the build", async () => {
   await assert.rejects(runCommand(process.execPath, ["-e", "process.exit(7)"]), /failed \(7\)/);
   await assert.rejects(runCommand("/nonexistent/t3-fork-build-command", []), { code: "ENOENT" });
 });
+
+test("parallel commands keep their environment settings separate", async () => {
+  await runParallel(
+    ["true", "false"].map(
+      (value) => () =>
+        runCommand(
+          process.execPath,
+          [
+            "-e",
+            `if (process.env.T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR !== "${value}") process.exit(1)`,
+          ],
+          { env: { ...process.env, T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: value } },
+        ),
+    ),
+  );
+});

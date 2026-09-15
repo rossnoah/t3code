@@ -1,9 +1,9 @@
 const { spawn } = require("node:child_process");
 
-function runCommand(command, args) {
+function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
-    const child = spawn(command, args, { stdio: "inherit" });
+    const child = spawn(command, args, { stdio: "inherit", env: options.env });
     child.once("error", reject);
     child.once("close", (code, signal) => {
       console.log(
@@ -28,12 +28,17 @@ async function runParallel(tasks) {
 }
 
 async function checkFork() {
-  await runCommand("node", [
+  // Cache reuse is a packaging instruction. Tests must exercise both build
+  // paths using their own configuration, independent of this runner's cache.
+  const env = { ...process.env };
+  delete env.T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR;
+  const runCheck = (command, args) => runCommand(command, args, { env });
+  await runCheck("node", [
     "--test",
     ".github/scripts/fork-nightly.test.cjs",
     ".github/scripts/build-fork-nightly.test.cjs",
   ]);
-  await runCommand("vp", [
+  await runCheck("vp", [
     "test",
     "run",
     "packages/shared/src/git.test.ts",
@@ -46,7 +51,7 @@ async function checkFork() {
     "apps/web/src/components/settings/ProviderModelsSection.test.ts",
     "scripts/build-desktop-artifact.test.ts",
   ]);
-  await runCommand("vp", [
+  await runCheck("vp", [
     "test",
     "run",
     "apps/server/src/server.test.ts",
@@ -91,4 +96,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { runCommand, runParallel };
+module.exports = { runCommand, runParallel, checkFork };
