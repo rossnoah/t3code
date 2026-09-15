@@ -30,10 +30,17 @@ jobs:
       upstream_url: ${{ steps.plan.outputs.upstream_url }}
       version: ${{ steps.plan.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          sparse-checkout: .github/scripts
-          persist-credentials: false
+      # Upstream reference repositories contain gitlinks without .gitmodules;
+      # checkout's credential cleanup traverses them and fails. This public
+      # checkout needs no credentials or reference repositories.
+      - name: Check out release planner
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin https://github.com/rossnoah/t3code.git
+          git fetch --depth=1 --filter=blob:none --no-tags origin "$GITHUB_SHA"
+          git sparse-checkout set --no-cone '/.github/scripts/'
+          git checkout --detach FETCH_HEAD
       - id: plan
         uses: actions/github-script@v8
         env:
