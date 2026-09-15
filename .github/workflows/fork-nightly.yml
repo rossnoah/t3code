@@ -1,0 +1,173 @@
+name: Noah's Apple Silicon Nightly
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if this fork and upstream nightly were already published
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-nightly
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.repository == 'rossnoah/t3code' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      upstream_sha: ${{ steps.plan.outputs.upstream_sha }}
+      upstream_tag: ${{ steps.plan.outputs.upstream_tag }}
+      upstream_url: ${{ steps.plan.outputs.upstream_url }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - id: plan
+        uses: actions/github-script@v8
+        env:
+          FORCE: ${{ inputs.force }}
+        with:
+          script: |
+            const { plan } = require('./.github/scripts/fork-nightly.cjs');
+            await plan({ github, context, core, force: process.env.FORCE === 'true' });
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      UPSTREAM_SHA: ${{ needs.plan.outputs.upstream_sha }}
+      UPSTREAM_TAG: ${{ needs.plan.outputs.upstream_tag }}
+      UPSTREAM_URL: ${{ needs.plan.outputs.upstream_url }}
+      FORK_SHA: ${{ github.sha }}
+    steps:
+      - name: Check signing configuration
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Add the personal $name repository secret before releasing."
+              exit 1
+            fi
+          done
+
+      # Merge all fork commits with the actual published nightly, including future
+      # customizations. The merge is isolated to this runner; conflicts never
+      # overwrite main, and the combined source is attached to the release.
+      - name: Combine fork changes with upstream nightly
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "https://github.com/rossnoah/t3code.git"
+          git remote add upstream "https://github.com/pingdotgg/t3code.git"
+          git fetch --no-tags origin main
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach "$FORK_SHA"
+          git fetch --no-tags upstream "refs/tags/$UPSTREAM_TAG"
+          test "$(git rev-parse FETCH_HEAD^{commit})" = "$UPSTREAM_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git merge --no-edit "$UPSTREAM_SHA"
+          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/fork-source.tar.gz"
+
+      - name: Set up Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install build dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Check fork behavior and packaging
+        run: |
+          node --test .github/scripts/fork-nightly.test.cjs
+          vp test run packages/shared/src/git.test.ts packages/shared/src/projectSettings.test.ts packages/contracts/src/settings.test.ts apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts scripts/build-desktop-artifact.test.ts
+
+      - name: Set nightly version
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      - name: Build, sign and notarize Apple Silicon app
+        env:
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: rossnoah/t3code
+          T3CODE_DESKTOP_APP_ID: com.rossnoah.t3code
+          T3CODE_DESKTOP_MAC_PASSKEYS: "false"
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_KEY" > "$key_path"
+          export APPLE_API_KEY="$key_path"
+          trap 'rm -f "$key_path"' EXIT
+          vp run dist:desktop:artifact --platform mac --arch arm64 --target dmg --signed --build-version "$VERSION"
+
+      - name: Verify signing, notarization and update feed
+        run: |
+          set -euo pipefail
+          test -f release/nightly-mac.yml
+          ditto -x -k "release/T3-Code-${VERSION}-arm64.zip" "$RUNNER_TEMP/verify"
+          apps=("$RUNNER_TEMP/verify/"*.app)
+          test "${#apps[@]}" -eq 1
+          codesign --verify --deep --strict "${apps[0]}"
+          xcrun stapler validate "${apps[0]}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${apps[0]}/Contents/Info.plist")" = com.rossnoah.t3code
+          grep -q 'owner: rossnoah' "${apps[0]}/Contents/Resources/app-update.yml"
+          grep -q 'repo: t3code' "${apps[0]}/Contents/Resources/app-update.yml"
+
+      - name: Publish fork nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { sourceMarker } = require('./.github/scripts/fork-nightly.cjs');
+          const body = [
+            "Personal Apple Silicon build of T3 Code. Local, direct, and Tailscale connections; T3 Connect is not configured.",
+            "",
+            `Upstream nightly: ${process.env.UPSTREAM_URL}`,
+            `Fork changes: https://github.com/rossnoah/t3code/commit/${process.env.FORK_SHA}`,
+            "",
+            "Download the arm64 DMG for the initial install. In-app nightly updates use this fork.",
+            "The fork-source.tar.gz attachment contains the combined build source. GitHub's automatic source archives contain only the fork commit.",
+            "",
+            sourceMarker(process.env.FORK_SHA, process.env.UPSTREAM_SHA),
+          ].join('\n');
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/fork-release-notes.md`, body);
+          NODE
+          gh release create "v$VERSION" \
+            --repo rossnoah/t3code --target "$FORK_SHA" --prerelease --latest=false \
+            --title "Noah's T3 Code $VERSION" \
+            --notes-file "$RUNNER_TEMP/fork-release-notes.md" \
+            release/*.dmg release/*.zip release/*.blockmap release/nightly-mac.yml \
+            "$RUNNER_TEMP/fork-source.tar.gz"
