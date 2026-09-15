@@ -3,7 +3,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   applyGitStatusStreamEvent,
+  buildGeneratedWorktreeBranchName,
   buildTemporaryWorktreeBranchName,
+  normalizeBranchPrefix,
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
@@ -240,5 +242,29 @@ describe("applyGitStatusStreamEvent", () => {
       behindCount: 1,
       pr: null,
     });
+  });
+});
+
+describe("generated worktree branch prefixes", () => {
+  it.each([
+    ["noah", "noah/"],
+    [" noah/ ", "noah/"],
+    ["Team//Noah/", "team/noah/"],
+    ["../Noah: Work/~", "noah-work/"],
+    ["", ""],
+  ])("normalizes %j to %j", (input, expected) => {
+    expect(normalizeBranchPrefix(input)).toBe(expected);
+  });
+
+  it.each([
+    ["Fix login", "t3code/", "t3code/fix-login"],
+    ["Fix login", "noah/", "noah/fix-login"],
+    ["refs/heads/noah/fix-login", "noah", "noah/fix-login"],
+    ["t3code/fix-login", "noah/", "noah/fix-login"],
+    ["feature/fix-login", "team/noah/", "team/noah/feature/fix-login"],
+    ["t3code/fix-login", "", "fix-login"],
+    ["!!!", "noah/", "noah/update"],
+  ])("builds %j with prefix %j", (input, prefix, expected) => {
+    expect(buildGeneratedWorktreeBranchName(input, prefix)).toBe(expected);
   });
 });

@@ -92,6 +92,42 @@ export function deriveLocalBranchNameFromRemoteRef(branchName: string): string {
   return branchName.slice(firstSeparatorIndex + 1);
 }
 
+/** Accept namespaces with or without a trailing slash; blank means no prefix. */
+export function normalizeBranchPrefix(raw: string): string {
+  return raw.trim().length === 0 ? "" : `${sanitizeBranchFragment(raw)}/`;
+}
+
+/** Apply the configured namespace to a generated descriptive worktree branch. */
+export function buildGeneratedWorktreeBranchName(
+  raw: string,
+  prefix = `${WORKTREE_BRANCH_PREFIX}/`,
+): string {
+  const normalizedPrefix = normalizeBranchPrefix(prefix);
+  const normalized = raw
+    .trim()
+    .toLowerCase()
+    .replace(/^refs\/heads\//, "")
+    .replace(/['"`]/g, "");
+
+  const existingPrefix = [normalizedPrefix, `${WORKTREE_BRANCH_PREFIX}/`].find(
+    (candidate) => candidate.length > 0 && normalized.startsWith(candidate),
+  );
+  const withoutPrefix = existingPrefix ? normalized.slice(existingPrefix.length) : normalized;
+
+  const branchFragment = withoutPrefix
+    .replace(/[^a-z0-9/_-]+/g, "-")
+    .replace(/\/+/g, "/")
+    .replace(/-+/g, "-")
+    .replace(/^[./_-]+|[./_-]+$/g, "")
+    .slice(0, 64)
+    .replace(/[./_-]+$/g, "");
+
+  const safeFragment = branchFragment.length > 0 ? branchFragment : "update";
+  return `${normalizedPrefix}${safeFragment}`;
+}
+
+// Temporary names keep a stable namespace so changing settings cannot prevent
+// unfinished branches from being recognized and renamed on another client.
 export function buildTemporaryWorktreeBranchName(
   randomHex: (byteLength: number) => string,
 ): string {
