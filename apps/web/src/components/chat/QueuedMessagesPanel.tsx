@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import {
   closestCenter,
   DndContext,
@@ -27,6 +27,8 @@ import {
 import { type QueuedComposerMessage, useQueuedMessageStore } from "../../queuedMessageStore";
 import { releaseDraftAttachments } from "../../lib/attachmentUploadQueue";
 import { Button } from "../ui/button";
+import { ComposerBanner } from "./ComposerBanner";
+import { cn } from "../../lib/utils";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
 
 export function QueuedMessagesPanel({
@@ -44,6 +46,7 @@ export function QueuedMessagesPanel({
   onSendNow: (id: string) => void;
   onInteractionChange: (active: boolean) => void;
 }) {
+  const listId = useId();
   const [collapsed, setCollapsed] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const sensors = useSensors(
@@ -55,93 +58,124 @@ export function QueuedMessagesPanel({
   const reorder = useQueuedMessageStore((state) => state.reorder);
   const remove = useQueuedMessageStore((state) => state.remove);
   const updatePrompt = useQueuedMessageStore((state) => state.updatePrompt);
+  const nextMessage = messages[0];
+  const collapsedPreview =
+    nextMessage?.prompt.trim() ||
+    (nextMessage?.images.length || nextMessage?.files.length ? "Attachments" : "Context");
   return (
-    <section
-      aria-label="Message queue"
-      className="mx-2 -mb-5 overflow-hidden rounded-t-xl border border-border bg-background pb-5"
-    >
-      <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-        <button
-          type="button"
-          className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm text-muted-foreground"
-          disabled={editingId !== null}
-          aria-expanded={!collapsed}
-          aria-controls="queued-message-list"
-          onClick={() => setCollapsed(!collapsed)}
-        >
-          <span>
-            {paused ? "Queue paused" : "Queued"}{" "}
-            <span className="text-xs">({messages.length})</span>
-          </span>
-          <ChevronDownIcon className={`size-4 ${collapsed ? "-rotate-90" : ""}`} />
-        </button>
-        <Button
-          type="button"
-          size="xs"
-          variant="outline"
-          disabled={editingId !== null}
-          onClick={() => (paused ? resume(threadKey) : pause(threadKey))}
-        >
-          {paused ? <PlayIcon className="size-3.5" /> : <PauseIcon className="size-3.5" />}
-          {paused ? "Resume" : "Pause"}
-        </Button>
-      </div>
-      <div
-        id="queued-message-list"
-        hidden={collapsed}
-        className="max-h-[min(30vh,16rem)] overflow-y-auto p-1.5"
+    <ComposerBanner.Attachment>
+      <ComposerBanner.Surface
+        role="region"
+        aria-label="Message queue"
+        className="pb-[calc(var(--chat-composer-attachment-overlap)+0.25rem)]"
       >
-        <DndContext
-          sensors={sensors}
-          collisionDetection={closestCenter}
-          onDragStart={() => onInteractionChange(true)}
-          onDragCancel={() => onInteractionChange(false)}
-          onDragEnd={({ active, over }) => {
-            if (over) reorder(threadKey, String(active.id), String(over.id));
-            onInteractionChange(false);
-          }}
-        >
-          <SortableContext
-            items={messages.map((message) => message.id)}
-            strategy={verticalListSortingStrategy}
+        <div className="flex min-h-9 items-center gap-2 px-2 py-1">
+          <button
+            type="button"
+            className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60"
+            disabled={editingId !== null}
+            aria-expanded={!collapsed}
+            aria-controls={listId}
+            onClick={() => setCollapsed(!collapsed)}
           >
-            {messages.map((message) => (
-              <QueuedMessageRow
-                key={message.id}
-                message={message}
-                editing={editingId === message.id}
-                dragDisabled={editingId !== null}
-                sendDisabled={sendDisabled || editingId !== null}
-                onSendNow={() => onSendNow(message.id)}
-                onDelete={() => {
-                  const removed = remove(threadKey, message.id);
-                  if (!removed) return;
-                  releaseDraftAttachments([...removed.images, ...removed.files]);
-                  for (const image of removed.images) {
-                    if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
-                  }
-                }}
-                onEdit={() => {
-                  setEditingId(message.id);
-                  onInteractionChange(true);
-                }}
-                onFinishEdit={(prompt) => {
-                  if (prompt !== null) updatePrompt(threadKey, message.id, prompt);
-                  setEditingId(null);
-                  onInteractionChange(false);
-                }}
-              />
-            ))}
-          </SortableContext>
-        </DndContext>
-      </div>
-    </section>
+            <ChevronDownIcon
+              aria-hidden
+              className={cn("size-3.5 shrink-0", collapsed && "-rotate-90")}
+            />
+            <span className={cn("shrink-0 font-medium", paused && "text-foreground")}>
+              {paused ? "Queue paused" : "Queued"}
+            </span>
+            <span className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded bg-foreground/5 px-1 text-[10px] tabular-nums">
+              {messages.length}
+            </span>
+            {collapsed ? (
+              <span className="truncate text-muted-foreground/70">{collapsedPreview}</span>
+            ) : null}
+          </button>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  size="xs"
+                  variant={paused ? "ghost" : "ghost-muted"}
+                  className={cn(
+                    "h-6 shrink-0 gap-1.5 rounded-md px-2 text-xs",
+                    paused && "bg-foreground/5",
+                  )}
+                  disabled={editingId !== null}
+                  onClick={() => (paused ? resume(threadKey) : pause(threadKey))}
+                />
+              }
+            >
+              {paused ? <PlayIcon className="size-3" /> : <PauseIcon className="size-3" />}
+              {paused ? "Resume" : "Pause"}
+            </TooltipTrigger>
+            <TooltipPopup>
+              {paused ? "Resume sending after each turn" : "Pause queued messages"}
+            </TooltipPopup>
+          </Tooltip>
+        </div>
+        <div
+          id={listId}
+          hidden={collapsed}
+          className="max-h-[min(30vh,16rem)] overflow-y-auto overscroll-contain px-1.5 pb-1"
+        >
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragStart={() => onInteractionChange(true)}
+            onDragCancel={() => onInteractionChange(false)}
+            onDragEnd={({ active, over }) => {
+              if (over) reorder(threadKey, String(active.id), String(over.id));
+              onInteractionChange(false);
+            }}
+          >
+            <SortableContext
+              items={messages.map((message) => message.id)}
+              strategy={verticalListSortingStrategy}
+            >
+              {messages.map((message) => (
+                <QueuedMessageRow
+                  key={message.id}
+                  message={message}
+                  editing={editingId === message.id}
+                  editDisabled={editingId !== null}
+                  dragDisabled={editingId !== null || messages.length < 2}
+                  sendDisabled={sendDisabled || editingId !== null}
+                  onSendNow={() => onSendNow(message.id)}
+                  onDelete={() => {
+                    const removed = remove(threadKey, message.id);
+                    if (!removed) return;
+                    releaseDraftAttachments([...removed.images, ...removed.files]);
+                    for (const image of removed.images) {
+                      if (image.previewUrl.startsWith("blob:"))
+                        URL.revokeObjectURL(image.previewUrl);
+                    }
+                  }}
+                  onEdit={() => {
+                    setEditingId(message.id);
+                    onInteractionChange(true);
+                  }}
+                  onFinishEdit={(prompt) => {
+                    if (prompt !== null) updatePrompt(threadKey, message.id, prompt);
+                    setEditingId(null);
+                    onInteractionChange(false);
+                  }}
+                />
+              ))}
+            </SortableContext>
+          </DndContext>
+        </div>
+      </ComposerBanner.Surface>
+    </ComposerBanner.Attachment>
   );
 }
 
 function QueuedMessageRow({
   message,
   editing,
+  editDisabled,
   dragDisabled,
   sendDisabled,
   onSendNow,
@@ -151,6 +185,7 @@ function QueuedMessageRow({
 }: {
   message: QueuedComposerMessage;
   editing: boolean;
+  editDisabled: boolean;
   dragDisabled: boolean;
   sendDisabled: boolean;
   onSendNow: () => void;
@@ -178,7 +213,11 @@ function QueuedMessageRow({
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition }}
       data-queued-message-id={message.id}
-      className={`group/queue-row relative flex items-start gap-1 rounded-lg px-1 py-2 hover:bg-muted/60 focus-within:bg-muted/60 ${isDragging ? "z-10 bg-muted shadow-md" : ""}`}
+      className={cn(
+        "group/queue-row relative flex items-start gap-1 rounded-lg px-1 py-1.5 hover:bg-foreground/4 focus-within:bg-foreground/4",
+        isDragging &&
+          "z-10 bg-(--chat-composer-attached-surface) shadow-md ring-1 ring-(--chat-composer-attached-outline)",
+      )}
     >
       <button
         ref={setActivatorNodeRef}
@@ -186,7 +225,7 @@ function QueuedMessageRow({
         {...attributes}
         {...listeners}
         aria-label="Drag to reorder message"
-        className="mt-0.5 touch-none rounded p-1 text-muted-foreground hover:text-foreground disabled:opacity-30"
+        className="mt-0.5 touch-none rounded p-1 text-muted-foreground/50 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring disabled:invisible pointer-fine:opacity-0 pointer-fine:group-hover/queue-row:opacity-100 pointer-fine:group-focus-within/queue-row:opacity-100"
         disabled={dragDisabled}
       >
         <GripVerticalIcon className="size-3.5" />
@@ -209,7 +248,7 @@ function QueuedMessageRow({
                   onFinishEdit(prompt);
                 }
               }}
-              className="min-h-20 w-full resize-y rounded-md border border-border bg-background px-2 py-1 text-sm outline-none focus:border-ring"
+              className="min-h-20 w-full resize-y rounded-lg border border-(--chat-composer-attached-outline) bg-background/40 px-2.5 py-2 text-[13px]/5 outline-none focus:border-ring"
             />
             <div className="mt-1 flex justify-end gap-1">
               <Button type="button" size="xs" variant="ghost" onClick={() => onFinishEdit(null)}>
@@ -221,12 +260,12 @@ function QueuedMessageRow({
             </div>
           </>
         ) : (
-          <div className="whitespace-pre-wrap break-words px-1 py-1 text-sm">
+          <div className="whitespace-pre-wrap px-1 py-1 text-[13px]/5 text-foreground/90 [overflow-wrap:anywhere]">
             {message.prompt || (attachmentCount ? "Attachments" : "Context")}
           </div>
         )}
         {attachmentCount + contextCount > 0 ? (
-          <div className="px-1 text-xs text-muted-foreground">
+          <div className="px-1 text-[11px]/4 text-muted-foreground">
             {[
               attachmentCount
                 ? `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`
@@ -239,7 +278,7 @@ function QueuedMessageRow({
         ) : null}
       </div>
       {!editing ? (
-        <div className="flex shrink-0 items-center sm:opacity-0 sm:group-hover/queue-row:opacity-100 sm:group-focus-within/queue-row:opacity-100">
+        <div className="mt-0.5 flex shrink-0 items-center gap-0.5">
           <Tooltip>
             <TooltipTrigger
               render={
@@ -247,8 +286,9 @@ function QueuedMessageRow({
                   type="button"
                   size="icon-xs"
                   variant="ghost"
+                  className="rounded-md pointer-fine:opacity-0 pointer-fine:group-hover/queue-row:opacity-100 pointer-fine:group-focus-within/queue-row:opacity-100"
                   aria-label="Edit queued message"
-                  disabled={dragDisabled}
+                  disabled={editDisabled}
                   onClick={() => {
                     setPrompt(message.prompt);
                     onEdit();
@@ -267,6 +307,7 @@ function QueuedMessageRow({
                   type="button"
                   size="icon-xs"
                   variant="ghost"
+                  className="rounded-md hover:bg-destructive/10 hover:text-destructive hover:[--control-icon-color:var(--destructive)] pointer-fine:opacity-0 pointer-fine:group-hover/queue-row:opacity-100 pointer-fine:group-focus-within/queue-row:opacity-100"
                   aria-label="Delete queued message"
                   onClick={onDelete}
                 />
@@ -283,6 +324,7 @@ function QueuedMessageRow({
                   type="button"
                   size="icon-xs"
                   variant="ghost"
+                  className="rounded-md text-muted-foreground hover:text-foreground"
                   aria-label="Send queued message now"
                   disabled={sendDisabled}
                   onClick={onSendNow}

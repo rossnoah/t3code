@@ -9513,25 +9513,25 @@ export default function ChatView(props: ChatViewProps) {
                         : undefined
                     }
                   >
-                    {activeThreadKey && queuedMessages.length > 0 ? (
-                      <QueuedMessagesPanel
-                        key={activeThreadKey}
-                        threadKey={activeThreadKey}
-                        messages={queuedMessages}
-                        paused={queuePaused}
-                        sendDisabled={
-                          isSendBusy ||
-                          queueBlockedByPendingRequest ||
-                          queueSendGate ||
-                          isConnecting
-                        }
-                        onSendNow={onSteerQueuedMessage}
-                        onInteractionChange={(active) =>
-                          setQueueInteractionThreadKey(active ? activeThreadKey : null)
-                        }
-                      />
-                    ) : null}
                     <ComposerSurface.Shell contextStrip={showComposerContextStrip}>
+                      {activeThreadKey && queuedMessages.length > 0 ? (
+                        <QueuedMessagesPanel
+                          key={activeThreadKey}
+                          threadKey={activeThreadKey}
+                          messages={queuedMessages}
+                          paused={queuePaused}
+                          sendDisabled={
+                            isSendBusy ||
+                            queueBlockedByPendingRequest ||
+                            queueSendGate ||
+                            isConnecting
+                          }
+                          onSendNow={onSteerQueuedMessage}
+                          onInteractionChange={(active) =>
+                            setQueueInteractionThreadKey(active ? activeThreadKey : null)
+                          }
+                        />
+                      ) : null}
                       <ComposerSurface.Host>
                         <div ref={attachDraftHeroComposerAnchorRef} className="relative z-10">
                           <ChatComposer
