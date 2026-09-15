@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   isQueuedMessageDue,
-  latestCompletedToolActivityId,
   useQueuedMessageStore,
   type QueuedComposerMessage,
 } from "./queuedMessageStore";
@@ -16,14 +15,18 @@ function makeMessage(prompt: string): Omit<QueuedComposerMessage, "id"> {
     previewAnnotations: [],
     reviewComments: [],
     submissionIntent: "foreground",
-    queuedAfterToolActivityId: null,
     createdAt: "2026-09-11T00:00:00.000Z",
   };
 }
+const queue = (key = "thread-a") => useQueuedMessageStore.getState().queuesByThreadKey[key] ?? [];
 
 describe("queuedMessageStore", () => {
   beforeEach(() => {
-    useQueuedMessageStore.setState({ queuesByThreadKey: {}, drainGeneration: 0 });
+    useQueuedMessageStore.setState({
+      queuesByThreadKey: {},
+      pausedByThreadKey: {},
+      pauseGenerationByThreadKey: {},
+    });
   });
 
   it("keeps messages in submission order per thread", () => {
@@ -31,113 +34,111 @@ describe("queuedMessageStore", () => {
     enqueue("thread-a", makeMessage("first"));
     enqueue("thread-a", makeMessage("second"));
     enqueue("thread-b", makeMessage("other"));
-
-    const queues = useQueuedMessageStore.getState().queuesByThreadKey;
-    expect(queues["thread-a"]?.map((message) => message.prompt)).toEqual(["first", "second"]);
-    expect(queues["thread-b"]?.map((message) => message.prompt)).toEqual(["other"]);
+    expect(queue().map((message) => message.prompt)).toEqual(["first", "second"]);
+    expect(queue("thread-b").map((message) => message.prompt)).toEqual(["other"]);
   });
 
-  it("take hands the message to exactly one caller", () => {
-    const { enqueue, take } = useQueuedMessageStore.getState();
-    const entry = enqueue("thread-a", makeMessage("first"));
-
-    expect(take("thread-a", entry.id, null)?.prompt).toBe("first");
-    expect(take("thread-a", entry.id, null)).toBeNull();
-    expect(useQueuedMessageStore.getState().queuesByThreadKey["thread-a"]).toBeUndefined();
-  });
-
-  it("take re-anchors the remaining messages to the current tool boundary", () => {
+  it("hands a message to exactly one sender", () => {
     const { enqueue, take } = useQueuedMessageStore.getState();
     const first = enqueue("thread-a", makeMessage("first"));
-    enqueue("thread-a", makeMessage("second"));
-
-    take("thread-a", first.id, "tool-2");
-
-    const [second] = useQueuedMessageStore.getState().queuesByThreadKey["thread-a"] ?? [];
-    expect(second?.queuedAfterToolActivityId).toBe("tool-2");
-    expect(
-      isQueuedMessageDue({ message: second!, phase: "running", latestToolActivityId: "tool-2" }),
-    ).toBe(false);
-  });
-
-  it("remove keeps the other messages' anchors", () => {
-    const { enqueue, remove } = useQueuedMessageStore.getState();
-    const first = enqueue("thread-a", { ...makeMessage("first"), queuedAfterToolActivityId: "t1" });
     const second = enqueue("thread-a", makeMessage("second"));
-
-    expect(remove("thread-a", second.id)?.prompt).toBe("second");
-    expect(remove("thread-a", second.id)).toBeNull();
-    expect(useQueuedMessageStore.getState().queuesByThreadKey["thread-a"]).toEqual([first]);
+    expect(take("thread-a", first.id)).toEqual(first);
+    expect(take("thread-a", first.id)).toBeNull();
+    expect(queue()).toEqual([second]);
   });
 
-  it("holdAtFront returns a failed message to the head, held", () => {
-    const { enqueue, take, holdAtFront } = useQueuedMessageStore.getState();
+  it("pauses without moving messages and keeps later submissions paused", () => {
+    const { enqueue, pause, resume } = useQueuedMessageStore.getState();
     const first = enqueue("thread-a", makeMessage("first"));
-    enqueue("thread-a", makeMessage("second"));
-    const taken = take("thread-a", first.id, "t1")!;
-
-    holdAtFront("thread-a", taken);
-
-    const queue = useQueuedMessageStore.getState().queuesByThreadKey["thread-a"] ?? [];
-    expect(queue.map((message) => message.prompt)).toEqual(["first", "second"]);
-    expect(queue[0]?.holdUntilUserAction).toBe(true);
-    expect(
-      isQueuedMessageDue({ message: queue[0]!, phase: "ready", latestToolActivityId: null }),
-    ).toBe(false);
+    pause("thread-a");
+    const second = enqueue("thread-a", makeMessage("second"));
+    expect(queue()).toEqual([first, second]);
+    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(true);
+    resume("thread-a");
+    expect(queue()).toEqual([first, second]);
+    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(false);
   });
 
-  it("drain empties one thread's queue in order", () => {
-    const { enqueue, drain } = useQueuedMessageStore.getState();
-    enqueue("thread-a", makeMessage("first"));
-    enqueue("thread-a", makeMessage("second"));
-    enqueue("thread-b", makeMessage("other"));
+  it("sending a selected message immediately leaves a paused queue paused", () => {
+    const { enqueue, pause, take } = useQueuedMessageStore.getState();
+    const first = enqueue("thread-a", makeMessage("first"));
+    const second = enqueue("thread-a", makeMessage("second"));
+    pause("thread-a");
+    expect(take("thread-a", second.id)).toEqual(second);
+    expect(queue()).toEqual([first]);
+    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(true);
+  });
 
-    expect(drain("thread-a").map((message) => message.prompt)).toEqual(["first", "second"]);
-    expect(useQueuedMessageStore.getState().drainGeneration).toBe(1);
-    expect(drain("thread-a")).toEqual([]);
-    expect(useQueuedMessageStore.getState().drainGeneration).toBe(1);
-    expect(useQueuedMessageStore.getState().queuesByThreadKey["thread-b"]).toHaveLength(1);
+  it("invalidates an in-flight upload even when it took the last queued message", () => {
+    const { enqueue, take, pause, resume } = useQueuedMessageStore.getState();
+    const message = enqueue("thread-a", makeMessage("upload"));
+    take("thread-a", message.id);
+    pause("thread-b");
+    expect(useQueuedMessageStore.getState().pauseGenerationByThreadKey["thread-a"] ?? 0).toBe(0);
+    pause("thread-a");
+    resume("thread-a");
+    expect(useQueuedMessageStore.getState().pauseGenerationByThreadKey["thread-a"]).toBe(1);
+    expect(useQueuedMessageStore.getState().pauseGenerationByThreadKey["thread-b"]).toBe(1);
+  });
+
+  it("returns failed sends to the head and pauses the whole queue", () => {
+    const { enqueue, take, holdAtFront, reorder } = useQueuedMessageStore.getState();
+    const first = enqueue("thread-a", makeMessage("first"));
+    const second = enqueue("thread-a", makeMessage("second"));
+    take("thread-a", first.id);
+    holdAtFront("thread-a", first);
+    holdAtFront("thread-a", first);
+    expect(queue()).toEqual([first, second]);
+    reorder("thread-a", first.id, second.id);
+    expect(queue()).toEqual([second, first]);
+    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(true);
+  });
+
+  it("reorders both directions without changing payloads or other threads", () => {
+    const { enqueue, reorder } = useQueuedMessageStore.getState();
+    const first = enqueue("thread-a", makeMessage("first"));
+    const second = enqueue("thread-a", makeMessage("second"));
+    const third = enqueue("thread-a", makeMessage("third"));
+    const other = enqueue("thread-b", makeMessage("other"));
+    reorder("thread-a", third.id, first.id);
+    expect(queue()).toEqual([third, first, second]);
+    reorder("thread-a", third.id, second.id);
+    expect(queue()).toEqual([first, second, third]);
+    reorder("thread-a", other.id, first.id);
+    reorder("thread-a", first.id, "deleted");
+    expect(queue()).toEqual([first, second, third]);
+    expect(queue("thread-b")).toEqual([other]);
+  });
+
+  it("edits only the selected prompt, retaining attachments and contexts", () => {
+    const { enqueue, updatePrompt, remove } = useQueuedMessageStore.getState();
+    const first = enqueue("thread-a", makeMessage("first"));
+    const second = enqueue("thread-a", makeMessage("second"));
+    updatePrompt("thread-a", first.id, "changed");
+    expect(queue()).toEqual([{ ...first, prompt: "changed" }, second]);
+    expect(queue()[0]?.images).toBe(first.images);
+    expect(queue()[0]?.terminalContexts).toBe(first.terminalContexts);
+    remove("thread-a", first.id);
+    updatePrompt("thread-a", first.id, "late edit");
+    expect(queue()).toEqual([second]);
+    remove("thread-a", second.id);
+    expect(useQueuedMessageStore.getState().queuesByThreadKey["thread-a"]).toBeUndefined();
   });
 });
 
 describe("queued message dispatch timing", () => {
-  const activities = [
-    { id: "a1", kind: "tool.started", sequence: 1, createdAt: "2026-01-01T00:00:01Z" },
-    { id: "a2", kind: "tool.completed", sequence: 2, createdAt: "2026-01-01T00:00:02Z" },
-    { id: "a3", kind: "tool.updated", sequence: 3, createdAt: "2026-01-01T00:00:03Z" },
-  ];
-
-  it("finds the newest completed tool call by sequence, not position", () => {
-    expect(latestCompletedToolActivityId(activities)).toBe("a2");
-    expect(latestCompletedToolActivityId([])).toBeNull();
-    expect(
-      latestCompletedToolActivityId([
-        { id: "late", kind: "tool.completed", sequence: 9, createdAt: "2026-01-01T00:00:09Z" },
-        { id: "early", kind: "tool.completed", sequence: 4, createdAt: "2026-01-01T00:00:04Z" },
-      ]),
-    ).toBe("late");
+  it.each(["running", "connecting"] as const)(
+    "waits while %s, regardless of tool completions",
+    (phase) => {
+      expect(isQueuedMessageDue({ phase, paused: false })).toBe(false);
+    },
+  );
+  it("can resume after Stop leaves the provider disconnected", () => {
+    expect(isQueuedMessageDue({ phase: "disconnected", paused: true })).toBe(false);
+    expect(isQueuedMessageDue({ phase: "disconnected", paused: false })).toBe(true);
   });
-
-  it("waits mid-turn until a tool call finishes after the message was queued", () => {
-    const message = { queuedAfterToolActivityId: "a2" };
-    expect(isQueuedMessageDue({ message, phase: "running", latestToolActivityId: "a2" })).toBe(
-      false,
-    );
-    expect(isQueuedMessageDue({ message, phase: "running", latestToolActivityId: "a4" })).toBe(
-      true,
-    );
-  });
-
-  it("never auto-sends a message held for user action", () => {
-    const message = { queuedAfterToolActivityId: null, holdUntilUserAction: true };
-    expect(isQueuedMessageDue({ message, phase: "ready", latestToolActivityId: "a4" })).toBe(false);
-  });
-
-  it("is due as soon as the turn is over, but not while a send is connecting", () => {
-    const message = { queuedAfterToolActivityId: "a2" };
-    expect(isQueuedMessageDue({ message, phase: "ready", latestToolActivityId: "a2" })).toBe(true);
-    expect(isQueuedMessageDue({ message, phase: "connecting", latestToolActivityId: "a4" })).toBe(
-      false,
-    );
+  it("sends only when the session is ready and the queue is resumed", () => {
+    expect(isQueuedMessageDue({ phase: "ready", paused: true })).toBe(false);
+    expect(isQueuedMessageDue({ phase: "ready", paused: false })).toBe(true);
   });
 });

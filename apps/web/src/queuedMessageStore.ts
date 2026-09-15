@@ -21,58 +21,32 @@ export interface QueuedComposerMessage {
   previewAnnotations: PreviewAnnotationPayload[];
   reviewComments: ReviewCommentContext[];
   submissionIntent: ComposerSubmissionIntent;
-  /**
-   * The newest completed tool activity at queue time. A different id later
-   * means a tool call finished after the user queued, which is the boundary
-   * the message goes out on.
-   */
-  queuedAfterToolActivityId: string | null;
-  /**
-   * Set when the message was created by Stop or a failed restore, not by the
-   * user pressing send. It waits for Send now instead of leaving on its own.
-   */
-  holdUntilUserAction?: boolean;
   createdAt: string;
 }
 
 interface QueuedMessageStoreState {
   queuesByThreadKey: Record<string, QueuedComposerMessage[]>;
-  /**
-   * Bumped by `drain`. A send that took a message before a drain and finishes
-   * its upload after it compares this to the value it captured and gives up,
-   * so Stop cannot be followed by a queued message starting a new turn.
-   */
-  drainGeneration: number;
+  pausedByThreadKey: Record<string, boolean>;
+  pauseGenerationByThreadKey: Record<string, number>;
   enqueue: (threadKey: string, message: Omit<QueuedComposerMessage, "id">) => QueuedComposerMessage;
-  /**
-   * Removes one message and returns it, or null when another caller already
-   * took it. The remaining messages are re-anchored to `toolActivityId` so
-   * only one queued message leaves per tool boundary.
-   */
-  take: (
-    threadKey: string,
-    id: string,
-    toolActivityId: string | null,
-  ) => QueuedComposerMessage | null;
-  /** Removes one message without touching the others' anchors. Null when already gone. */
+  take: (threadKey: string, id: string) => QueuedComposerMessage | null;
   remove: (threadKey: string, id: string) => QueuedComposerMessage | null;
-  /**
-   * Puts a message back at the head, held for user action. Used when its
-   * send failed: the queue keeps its order and nothing behind it overtakes.
-   */
   holdAtFront: (threadKey: string, message: QueuedComposerMessage) => void;
-  /** Removes and returns every queued message for the thread, oldest first. */
-  drain: (threadKey: string) => QueuedComposerMessage[];
+  pause: (threadKey: string) => void;
+  resume: (threadKey: string) => void;
+  updatePrompt: (threadKey: string, id: string, prompt: string) => void;
+  reorder: (threadKey: string, id: string, overId: string) => void;
 }
 
 const EMPTY_QUEUE: QueuedComposerMessage[] = [];
 
-/** In-memory only: a queued message is a live intent, not a draft worth persisting. */
+/** Queues belong to this client session, scoped to an environment and thread. */
 export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get) => ({
   queuesByThreadKey: {},
-  drainGeneration: 0,
+  pausedByThreadKey: {},
+  pauseGenerationByThreadKey: {},
   enqueue: (threadKey, message) => {
-    const entry: QueuedComposerMessage = { ...message, id: randomUUID() };
+    const entry = { ...message, id: randomUUID() };
     set((state) => ({
       queuesByThreadKey: {
         ...state.queuesByThreadKey,
@@ -81,119 +55,75 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
     }));
     return entry;
   },
-  take: (threadKey, id, toolActivityId) => {
-    const queue = get().queuesByThreadKey[threadKey];
-    const entry = queue?.find((message) => message.id === id);
-    if (!queue || !entry) {
-      return null;
-    }
-    set((state) => {
-      const remaining = (state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE)
-        .filter((message) => message.id !== id)
-        .map((message) =>
-          message.queuedAfterToolActivityId === toolActivityId
-            ? message
-            : { ...message, queuedAfterToolActivityId: toolActivityId },
-        );
-      const queuesByThreadKey = { ...state.queuesByThreadKey };
-      if (remaining.length === 0) {
-        delete queuesByThreadKey[threadKey];
-      } else {
-        queuesByThreadKey[threadKey] = remaining;
-      }
-      return { queuesByThreadKey };
-    });
-    return entry;
-  },
+  take: (threadKey, id) => get().remove(threadKey, id),
   remove: (threadKey, id) => {
     const queue = get().queuesByThreadKey[threadKey];
     const entry = queue?.find((message) => message.id === id);
-    if (!queue || !entry) {
-      return null;
-    }
+    if (!queue || !entry) return null;
     set((state) => {
-      const remaining = (state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE).filter(
-        (message) => message.id !== id,
-      );
+      const remaining = queue.filter((message) => message.id !== id);
       const queuesByThreadKey = { ...state.queuesByThreadKey };
-      if (remaining.length === 0) {
-        delete queuesByThreadKey[threadKey];
-      } else {
-        queuesByThreadKey[threadKey] = remaining;
-      }
+      if (remaining.length === 0) delete queuesByThreadKey[threadKey];
+      else queuesByThreadKey[threadKey] = remaining;
       return { queuesByThreadKey };
     });
     return entry;
   },
   holdAtFront: (threadKey, message) => {
-    set((state) => {
-      const rest = (state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE).filter(
-        (entry) => entry.id !== message.id,
-      );
-      return {
-        queuesByThreadKey: {
-          ...state.queuesByThreadKey,
-          [threadKey]: [{ ...message, holdUntilUserAction: true }, ...rest],
-        },
-      };
-    });
+    set((state) => ({
+      queuesByThreadKey: {
+        ...state.queuesByThreadKey,
+        [threadKey]: [
+          message,
+          ...(state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE).filter(
+            (entry) => entry.id !== message.id,
+          ),
+        ],
+      },
+      pausedByThreadKey: { ...state.pausedByThreadKey, [threadKey]: true },
+    }));
   },
-  drain: (threadKey) => {
+  pause: (threadKey) =>
+    set((state) => ({
+      pausedByThreadKey: { ...state.pausedByThreadKey, [threadKey]: true },
+      // Even an empty queue can have a message awaiting an upload. Scope the
+      // cancellation to this thread so stopping another chat cannot cancel it.
+      pauseGenerationByThreadKey: {
+        ...state.pauseGenerationByThreadKey,
+        [threadKey]: (state.pauseGenerationByThreadKey[threadKey] ?? 0) + 1,
+      },
+    })),
+  resume: (threadKey) =>
+    set((state) => ({
+      pausedByThreadKey: { ...state.pausedByThreadKey, [threadKey]: false },
+    })),
+  updatePrompt: (threadKey, id, prompt) =>
+    set((state) => ({
+      queuesByThreadKey: {
+        ...state.queuesByThreadKey,
+        [threadKey]: (state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE).map((message) =>
+          message.id === id ? { ...message, prompt } : message,
+        ),
+      },
+    })),
+  reorder: (threadKey, id, overId) => {
     const queue = get().queuesByThreadKey[threadKey];
-    if (!queue || queue.length === 0) {
-      return EMPTY_QUEUE;
-    }
-    set((state) => {
-      const queuesByThreadKey = { ...state.queuesByThreadKey };
-      delete queuesByThreadKey[threadKey];
-      return { queuesByThreadKey, drainGeneration: state.drainGeneration + 1 };
-    });
-    return queue;
+    if (!queue || id === overId) return;
+    const from = queue.findIndex((message) => message.id === id);
+    const to = queue.findIndex((message) => message.id === overId);
+    if (from < 0 || to < 0) return;
+    const reordered = [...queue];
+    reordered.splice(to, 0, ...reordered.splice(from, 1));
+    set((state) => ({ queuesByThreadKey: { ...state.queuesByThreadKey, [threadKey]: reordered } }));
   },
 }));
 
-/**
- * The newest finished tool call. Its id changing is the boundary a queued
- * message goes out on. Live arrays are sorted, but a snapshot loaded from the
- * database is not, so pick by sequence rather than position.
- */
-export function latestCompletedToolActivityId(
-  activities: ReadonlyArray<{
-    readonly id: string;
-    readonly kind: string;
-    readonly sequence?: number | undefined;
-    readonly createdAt: string;
-  }>,
-): string | null {
-  let latest: (typeof activities)[number] | null = null;
-  for (const activity of activities) {
-    if (activity.kind !== "tool.completed") continue;
-    if (
-      latest === null ||
-      (activity.sequence ?? -1) > (latest.sequence ?? -1) ||
-      ((activity.sequence ?? -1) === (latest.sequence ?? -1) &&
-        activity.createdAt > latest.createdAt)
-    ) {
-      latest = activity;
-    }
-  }
-  return latest?.id ?? null;
-}
-
-/**
- * A queued message is due mid-turn once a tool call finished after it was
- * queued, and as soon as the turn is over otherwise. "connecting" is the gap
- * between a send and the provider picking it up, so nothing is due there.
- */
+/** Wait for the whole turn. A resumed interrupted session can start a new turn. */
 export function isQueuedMessageDue(input: {
-  message: Pick<QueuedComposerMessage, "queuedAfterToolActivityId" | "holdUntilUserAction">;
+  paused: boolean;
   phase: "connecting" | "running" | "ready" | "disconnected";
-  latestToolActivityId: string | null;
 }): boolean {
-  if (input.message.holdUntilUserAction) return false;
-  if (input.phase === "connecting") return false;
-  if (input.phase !== "running") return true;
-  return input.latestToolActivityId !== input.message.queuedAfterToolActivityId;
+  return !input.paused && input.phase !== "running" && input.phase !== "connecting";
 }
 
 export function useQueuedMessages(threadKey: string): QueuedComposerMessage[] {
