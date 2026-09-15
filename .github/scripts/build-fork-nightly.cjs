@@ -49,6 +49,7 @@ async function checkFork() {
     "apps/web/src/components/GitActionsControl.logic.test.ts",
     "apps/web/src/modelOrdering.test.ts",
     "apps/web/src/components/settings/ProviderModelsSection.test.ts",
+    "apps/web/vite/reactCompiler.test.ts",
     "scripts/build-desktop-artifact.test.ts",
   ]);
   await runCheck("vp", [
