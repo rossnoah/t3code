@@ -28,8 +28,15 @@ interface QueuedMessageStoreState {
   queuesByThreadKey: Record<string, QueuedComposerMessage[]>;
   pausedByThreadKey: Record<string, boolean>;
   pauseGenerationByThreadKey: Record<string, number>;
+  // Remember the completion that handed off to a queued send, even after
+  // take removes the last message and before notification effects observe it.
+  suppressedCompletionByThreadKey: Record<string, number>;
   enqueue: (threadKey: string, message: Omit<QueuedComposerMessage, "id">) => QueuedComposerMessage;
-  take: (threadKey: string, id: string) => QueuedComposerMessage | null;
+  take: (
+    threadKey: string,
+    id: string,
+    completedAt?: string | null,
+  ) => QueuedComposerMessage | null;
   remove: (threadKey: string, id: string) => QueuedComposerMessage | null;
   holdAtFront: (threadKey: string, message: QueuedComposerMessage) => void;
   pause: (threadKey: string) => void;
@@ -45,6 +52,7 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
   queuesByThreadKey: {},
   pausedByThreadKey: {},
   pauseGenerationByThreadKey: {},
+  suppressedCompletionByThreadKey: {},
   enqueue: (threadKey, message) => {
     const entry = { ...message, id: randomUUID() };
     set((state) => ({
@@ -55,7 +63,19 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
     }));
     return entry;
   },
-  take: (threadKey, id) => get().remove(threadKey, id),
+  take: (threadKey, id, completedAt) => {
+    if (!get().queuesByThreadKey[threadKey]?.some((message) => message.id === id)) return null;
+    const completion = Date.parse(completedAt ?? "");
+    if (Number.isFinite(completion)) {
+      set((state) => ({
+        suppressedCompletionByThreadKey: {
+          ...state.suppressedCompletionByThreadKey,
+          [threadKey]: completion,
+        },
+      }));
+    }
+    return get().remove(threadKey, id);
+  },
   remove: (threadKey, id) => {
     const queue = get().queuesByThreadKey[threadKey];
     const entry = queue?.find((message) => message.id === id);
@@ -128,4 +148,13 @@ export function isQueuedMessageDue(input: {
 
 export function useQueuedMessages(threadKey: string): QueuedComposerMessage[] {
   return useQueuedMessageStore((state) => state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE);
+}
+
+/** Read at notification time; draining or deleting a queue must not replay old alerts. */
+export function isQueuedCompletionSuppressed(threadKey: string, completedAt: number): boolean {
+  const state = useQueuedMessageStore.getState();
+  return (
+    (state.queuesByThreadKey[threadKey]?.length ?? 0) > 0 ||
+    state.suppressedCompletionByThreadKey[threadKey] === completedAt
+  );
 }

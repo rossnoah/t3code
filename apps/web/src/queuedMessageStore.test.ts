@@ -26,6 +26,7 @@ describe("queuedMessageStore", () => {
       queuesByThreadKey: {},
       pausedByThreadKey: {},
       pauseGenerationByThreadKey: {},
+      suppressedCompletionByThreadKey: {},
     });
   });
 

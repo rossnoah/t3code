@@ -7573,7 +7573,13 @@ export default function ChatView(props: ChatViewProps) {
     // later retry. From here on a failure returns it to the paused queue.
     if (queuedMessage) {
       const taken = activeThreadKey
-        ? useQueuedMessageStore.getState().take(activeThreadKey, queuedMessage.id)
+        ? useQueuedMessageStore
+            .getState()
+            .take(
+              activeThreadKey,
+              queuedMessage.id,
+              phase === "running" ? null : activeThread.latestTurn?.completedAt,
+            )
         : null;
       if (!taken) {
         sendInFlightRef.current = false;
