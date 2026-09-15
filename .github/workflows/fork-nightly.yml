@@ -63,6 +63,8 @@ jobs:
       UPSTREAM_TAG: ${{ needs.plan.outputs.upstream_tag }}
       UPSTREAM_URL: ${{ needs.plan.outputs.upstream_url }}
       FORK_SHA: ${{ github.sha }}
+      # Level 1 preserves ZIP compatibility and avoids spending most archive time on compression.
+      ELECTRON_BUILDER_COMPRESSION_LEVEL: "1"
       BUILD_TARGET: ${{ github.event_name == 'push' && 'zip' || 'dmg' }}
     steps:
       - name: Check signing configuration
