@@ -104,11 +104,12 @@ jobs:
           git merge --no-edit "$UPSTREAM_SHA"
           git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/fork-source.tar.gz"
 
-      - name: Configure download caches
+      - name: Configure build caches
         run: |
           echo "ELECTRON_CACHE=$RUNNER_TEMP/electron-cache" >> "$GITHUB_ENV"
           echo "electron_config_cache=$RUNNER_TEMP/electron-cache" >> "$GITHUB_ENV"
           echo "ELECTRON_BUILDER_CACHE=$RUNNER_TEMP/electron-builder-cache" >> "$GITHUB_ENV"
+          echo "T3CODE_REACT_COMPILER_CACHE=$RUNNER_TEMP/react-compiler-cache" >> "$GITHUB_ENV"
 
       - name: Set up Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
@@ -128,6 +129,16 @@ jobs:
 
       - name: Install build dependencies
         run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      # Save new module results after each successful run, including scheduled
+      # builds where only upstream changed. The compiler validates each entry
+      # against its source, path, toolchain and configuration before reuse.
+      - name: Cache React compiler transforms
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/react-compiler-cache
+          key: fork-react-compiler-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml', 'apps/web/vite.config.ts', 'apps/web/vite/reactCompiler.ts') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fork-react-compiler-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml', 'apps/web/vite.config.ts', 'apps/web/vite/reactCompiler.ts') }}-
 
       - name: Resolve native build toolchain
         id: toolchain

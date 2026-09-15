@@ -1,7 +1,6 @@
 import * as NodeZlib from "node:zlib";
 
-import react, { reactCompilerPreset } from "@vitejs/plugin-react";
-import babel from "@rolldown/plugin-babel";
+import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import compression from "compression";
 import { defineProject, type TestProjectInlineConfiguration } from "vite-plus/test/config";
@@ -14,6 +13,7 @@ import { DEV_PROXIED_PATH_PREFIXES } from "@t3tools/shared/devProxy";
 import { loadRepoEnv } from "../../scripts/lib/public-config";
 import { thirdPartyLicensesPlugin } from "../../scripts/lib/third-party-licenses";
 import { tailwindPlugins } from "./vite/tailwind";
+import { reactCompilerPlugin } from "./vite/reactCompiler";
 
 const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
@@ -153,7 +153,7 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
   .filter((entry) => entry.length > 0);
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
   return {
     assetsInclude: ["**/*.wasm"],
     plugins: [
@@ -172,14 +172,9 @@ export default defineConfig(() => {
       // them on navigation intent (see getRouter's defaultPreload).
       tanstackRouter({ autoCodeSplitting: true }),
       react(),
-      babel({
-        // We need to be explicit about the parser options after moving to @vitejs/plugin-react v6.0.0
-        // This is because the babel plugin only automatically parses typescript and jsx based on relative paths (e.g. "**/*.ts")
-        // whereas the previous version of the plugin parsed all files with a .ts extension.
-        // This is causing our packages/ directory to fail to parse, as they are not relative to the CWD.
-        parserOpts: { plugins: ["typescript", "jsx"] },
-        presets: [reactCompilerPreset()],
-      }),
+      reactCompilerPlugin(
+        command === "build" ? process.env.T3CODE_REACT_COMPILER_CACHE : undefined,
+      ),
       tailwindPlugins(bundledDev),
     ],
     optimizeDeps: {
