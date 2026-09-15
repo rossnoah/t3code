@@ -2,6 +2,7 @@ import type { VcsStatusRemoteResult, VcsStatusResult } from "@t3tools/contracts"
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  applyTemporaryWorktreeBranchPrefix,
   applyGitStatusStreamEvent,
   buildGeneratedWorktreeBranchName,
   buildTemporaryWorktreeBranchName,
@@ -135,6 +136,34 @@ describe("parseGitHubRepositoryNameWithOwnerFromRemoteUrl", () => {
 });
 
 describe("isTemporaryWorktreeBranch", () => {
+  it.each([
+    ["noah/", "noah/worktree-deadbeef"],
+    ["Team/Noah", "team/noah/worktree-deadbeef"],
+    ["", "worktree-deadbeef"],
+  ])(
+    "recognizes placeholders with prefix %j independently of current settings",
+    (prefix, branch) => {
+      expect(buildTemporaryWorktreeBranchName(() => "deadbeef", prefix)).toBe(branch);
+      expect(isTemporaryWorktreeBranch(branch)).toBe(true);
+      expect(applyTemporaryWorktreeBranchPrefix("t3code/deadbeef", prefix)).toBe(branch);
+      expect(applyTemporaryWorktreeBranchPrefix(branch, "changed/")).toBe(
+        "changed/worktree-deadbeef",
+      );
+    },
+  );
+
+  it("does not treat arbitrary user branches with hex names as placeholders", () => {
+    for (const branch of [
+      "noah/deadbeef",
+      "deadbeef",
+      "feature/worktree-fix",
+      "noah/worktree-deadbeef-extra",
+    ]) {
+      expect(isTemporaryWorktreeBranch(branch)).toBe(false);
+      expect(applyTemporaryWorktreeBranchPrefix(branch, "different/")).toBe(branch);
+    }
+  });
+
   it("matches the generated temporary worktree refName format", () => {
     expect(
       isTemporaryWorktreeBranch(

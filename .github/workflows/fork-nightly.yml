@@ -114,7 +114,8 @@ jobs:
       - name: Check fork behavior and packaging
         run: |
           node --test .github/scripts/fork-nightly.test.cjs
-          vp test run packages/shared/src/git.test.ts packages/shared/src/projectSettings.test.ts packages/contracts/src/settings.test.ts apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts scripts/build-desktop-artifact.test.ts
+          vp test run packages/shared/src/git.test.ts packages/shared/src/projectSettings.test.ts packages/contracts/src/settings.test.ts apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts apps/server/src/orchestration/Layers/CheckpointReactor.test.ts apps/web/src/components/GitActionsControl.logic.test.ts scripts/build-desktop-artifact.test.ts
+          vp test run apps/server/src/server.test.ts -t 'bootstraps first-send worktree turns'
 
       - name: Set nightly version
         run: node scripts/update-release-package-versions.ts "$VERSION"
