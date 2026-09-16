@@ -44,6 +44,16 @@ any remaining queued messages in order.
 Queues stay in the current client session and send while that thread is open.
 They are not shared between devices or preserved when the client reloads.
 
+In **Settings → General → Follow-up behavior**, choose **Queue** to keep this
+behavior or **Steer** to send new messages immediately. This setting applies to
+the current client. Messages already queued keep their place. While the queue is
+paused, new messages join it even with **Steer** selected.
+
+Use `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` on Windows and Linux to send
+the oldest queued message now. Change `thread.steerQueuedMessage` in
+**Settings → Keybindings** to use another shortcut. It leaves the current draft
+in the composer and waits if the agent needs an approval or an answer.
+
 ## Queue messages offline on mobile
 
 Mobile keeps local copies of draft attachments, so you can preview them and queue

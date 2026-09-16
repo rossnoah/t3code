@@ -138,6 +138,19 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
   },
 }));
 
+/** A paused queue keeps new follow-ups even when immediate steering is enabled. */
+export function shouldQueueFollowUp(input: {
+  isRunning: boolean;
+  hasQueuedMessages: boolean;
+  paused: boolean;
+  followUpBehavior: "queue" | "steer";
+}): boolean {
+  return (
+    (input.isRunning || input.hasQueuedMessages) &&
+    (input.paused || input.followUpBehavior === "queue")
+  );
+}
+
 /** Wait for the whole turn. A resumed interrupted session can start a new turn. */
 export function isQueuedMessageDue(input: {
   paused: boolean;

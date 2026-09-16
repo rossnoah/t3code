@@ -313,6 +313,7 @@ import {
 import { QueuedMessagesPanel } from "./chat/QueuedMessagesPanel";
 import {
   isQueuedMessageDue,
+  shouldQueueFollowUp,
   type QueuedComposerMessage,
   useQueuedMessages,
   useQueuedMessageStore,
@@ -6554,6 +6555,10 @@ export default function ChatView(props: ChatViewProps) {
     terminalUiOpenByThreadRef.current[activeThreadKey] = current;
   }, [activeThreadKey, focusComposer, terminalUiState.terminalOpen]);
 
+  const steerQueuedMessageFromShortcut = useEffectEvent((id: string) => {
+    onSteerQueuedMessage(id);
+  });
+
   const getShortcutContext = useCallback(
     () => ({
       terminalFocus: getTerminalFocusOwner() !== null,
@@ -6780,6 +6785,17 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
 
+      if (command === "thread.steerQueuedMessage") {
+        const message = activeThreadKey
+          ? useQueuedMessageStore.getState().queuesByThreadKey[activeThreadKey]?.[0]
+          : undefined;
+        if (!message) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) steerQueuedMessageFromShortcut(message.id);
+        return;
+      }
+
       if (command === "thread.stop") {
         // An unavailable command should not shadow contextual shortcuts such as Escape to close a dialog.
         if (!canInterruptRunningThread) return;
@@ -6809,6 +6825,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadPinned,
     activeThreadSettled,
     canInterruptRunningThread,
+    activeThreadKey,
     terminalUiState.terminalOpen,
     terminalUiState.activeTerminalId,
     activeThreadId,
@@ -7456,12 +7473,17 @@ export default function ChatView(props: ChatViewProps) {
       );
       return;
     }
-    // New follow-ups join the queue in order, including while it is paused.
+    // A paused queue retains new follow-ups regardless of the steering preference.
     if (
       !queuedMessage &&
       !directAnnotation &&
       activeThreadKey &&
-      (phase === "running" || queuedMessages.length > 0)
+      shouldQueueFollowUp({
+        isRunning: phase === "running",
+        hasQueuedMessages: queuedMessages.length > 0,
+        paused: queuePaused,
+        followUpBehavior: settings.followUpBehavior,
+      })
     ) {
       if (composerRef.current?.validateProviderInput(promptForSend) === false) {
         return;
@@ -8173,7 +8195,15 @@ export default function ChatView(props: ChatViewProps) {
 
   const onSteerQueuedMessage = (id: string) => {
     const message = queuedMessages.find((entry) => entry.id === id);
-    if (!message || sendInFlightRef.current || queueBlockedByPendingRequest) return;
+    if (
+      !message ||
+      sendInFlightRef.current ||
+      isSendBusy ||
+      isConnecting ||
+      queueBlockedByPendingRequest ||
+      queueSendGate
+    )
+      return;
     void onSend(undefined, message.submissionIntent, undefined, message);
   };
 
