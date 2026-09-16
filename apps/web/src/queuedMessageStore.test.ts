@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   isQueuedMessageDue,
+  shouldQueueFollowUp,
   useQueuedMessageStore,
   type QueuedComposerMessage,
 } from "./queuedMessageStore";
@@ -177,6 +178,66 @@ describe("queuedMessageStore", () => {
     expect(queue()).toEqual([second]);
     remove("thread-a", second.id);
     expect(useQueuedMessageStore.getState().queuesByThreadKey["thread-a"]).toBeUndefined();
+  });
+});
+
+describe("follow-up behavior", () => {
+  it("queues running follow-ups by default and steers when requested", () => {
+    const state = { isRunning: true, hasQueuedMessages: false, paused: false };
+    expect(shouldQueueFollowUp({ ...state, followUpBehavior: "queue" })).toBe(true);
+    expect(shouldQueueFollowUp({ ...state, followUpBehavior: "steer" })).toBe(false);
+  });
+
+  it("reverses the follow-up preference for the alternate send shortcut", () => {
+    const state = {
+      isRunning: true,
+      hasQueuedMessages: false,
+      paused: false,
+      submissionIntent: "alternate" as const,
+    };
+    expect(shouldQueueFollowUp({ ...state, followUpBehavior: "queue" })).toBe(false);
+    expect(shouldQueueFollowUp({ ...state, followUpBehavior: "steer" })).toBe(true);
+  });
+
+  it.each(["queue", "steer"] as const)(
+    "keeps alternate submissions in a paused queue with %s selected",
+    (followUpBehavior) => {
+      expect(
+        shouldQueueFollowUp({
+          isRunning: true,
+          hasQueuedMessages: true,
+          paused: true,
+          followUpBehavior,
+          submissionIntent: "alternate",
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it.each([true, false])(
+    "keeps a paused queue paused with steering enabled (running: %s)",
+    (isRunning) => {
+      expect(
+        shouldQueueFollowUp({
+          isRunning,
+          hasQueuedMessages: true,
+          paused: true,
+          followUpBehavior: "steer",
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it("keeps new messages behind a waiting queue unless steering is selected", () => {
+    const state = { isRunning: false, hasQueuedMessages: true, paused: false };
+    expect(shouldQueueFollowUp({ ...state, followUpBehavior: "queue" })).toBe(true);
+    expect(shouldQueueFollowUp({ ...state, followUpBehavior: "steer" })).toBe(false);
+  });
+
+  it("sends normally when no turn or queued messages are waiting", () => {
+    const state = { isRunning: false, hasQueuedMessages: false, paused: false };
+    expect(shouldQueueFollowUp({ ...state, followUpBehavior: "queue" })).toBe(false);
+    expect(shouldQueueFollowUp({ ...state, followUpBehavior: "steer" })).toBe(false);
   });
 });
 
