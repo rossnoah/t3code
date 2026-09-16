@@ -70,11 +70,19 @@ describe("queuedMessageStore", () => {
     expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(true);
   });
 
-  it("starts a new queue unpaused after Stop was pressed with no queued messages", () => {
-    const { enqueue, pause } = useQueuedMessageStore.getState();
+  it("keeps new submissions paused after Stop until explicitly resumed", () => {
+    const { enqueue, pause, resume } = useQueuedMessageStore.getState();
     pause("thread-a");
     const message = enqueue("thread-a", makeMessage("follow-up after restarting"));
 
+    expect(queue()).toEqual([message]);
+    expect(
+      isQueuedMessageDue({
+        phase: "ready",
+        paused: useQueuedMessageStore.getState().pausedByThreadKey["thread-a"] ?? false,
+      }),
+    ).toBe(false);
+    resume("thread-a");
     expect(queue()).toEqual([message]);
     expect(
       isQueuedMessageDue({
@@ -85,7 +93,7 @@ describe("queuedMessageStore", () => {
   });
 
   it.each(["remove", "take"] as const)(
-    "starts a new queue unpaused after %s empties a paused queue",
+    "keeps new submissions paused after %s empties a paused queue",
     (action) => {
       const { enqueue, pause } = useQueuedMessageStore.getState();
       const previous = enqueue("thread-a", makeMessage("previous"));
@@ -94,7 +102,7 @@ describe("queuedMessageStore", () => {
       const next = enqueue("thread-a", makeMessage("next"));
 
       expect(queue()).toEqual([next]);
-      expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(false);
+      expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(true);
     },
   );
 

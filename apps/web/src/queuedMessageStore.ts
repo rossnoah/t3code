@@ -60,11 +60,6 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
         ...state.queuesByThreadKey,
         [threadKey]: [...(state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE), entry],
       },
-      // Stop can pause an empty queue. Only carry that pause into new
-      // submissions while messages are still waiting for an explicit Resume.
-      pausedByThreadKey: state.queuesByThreadKey[threadKey]?.length
-        ? state.pausedByThreadKey
-        : { ...state.pausedByThreadKey, [threadKey]: false },
     }));
     return entry;
   },
