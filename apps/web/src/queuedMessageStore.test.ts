@@ -70,6 +70,51 @@ describe("queuedMessageStore", () => {
     expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(true);
   });
 
+  it("starts a new queue unpaused after Stop was pressed with no queued messages", () => {
+    const { enqueue, pause } = useQueuedMessageStore.getState();
+    pause("thread-a");
+    const message = enqueue("thread-a", makeMessage("follow-up after restarting"));
+
+    expect(queue()).toEqual([message]);
+    expect(
+      isQueuedMessageDue({
+        phase: "ready",
+        paused: useQueuedMessageStore.getState().pausedByThreadKey["thread-a"] ?? false,
+      }),
+    ).toBe(true);
+  });
+
+  it.each(["remove", "take"] as const)(
+    "starts a new queue unpaused after %s empties a paused queue",
+    (action) => {
+      const { enqueue, pause } = useQueuedMessageStore.getState();
+      const previous = enqueue("thread-a", makeMessage("previous"));
+      pause("thread-a");
+      useQueuedMessageStore.getState()[action]("thread-a", previous.id);
+      const next = enqueue("thread-a", makeMessage("next"));
+
+      expect(queue()).toEqual([next]);
+      expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(false);
+    },
+  );
+
+  it("keeps a stopped upload cancelled when a new queue starts before it returns", () => {
+    const { enqueue, take, pause, holdAtFront } = useQueuedMessageStore.getState();
+    const uploading = enqueue("thread-a", makeMessage("upload"));
+    take("thread-a", uploading.id);
+    const generationAtTake =
+      useQueuedMessageStore.getState().pauseGenerationByThreadKey["thread-a"] ?? 0;
+    pause("thread-a");
+    const next = enqueue("thread-a", makeMessage("next"));
+
+    expect(useQueuedMessageStore.getState().pauseGenerationByThreadKey["thread-a"]).toBe(
+      generationAtTake + 1,
+    );
+    holdAtFront("thread-a", uploading);
+    expect(queue()).toEqual([uploading, next]);
+    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(true);
+  });
+
   it("invalidates an in-flight upload even when it took the last queued message", () => {
     const { enqueue, take, pause, resume } = useQueuedMessageStore.getState();
     const message = enqueue("thread-a", makeMessage("upload"));
