@@ -134,7 +134,7 @@ describe("queued desktop updates", () => {
     expect(h.installUpdate).not.toHaveBeenCalled();
     expect(h.controller.getSnapshot().status).toBe("queued");
     expect(h.onError).not.toHaveBeenCalled();
-    h.controller.activityChanged();
+    h.controller.updateChanged(update);
     await settle();
     expect(h.installUpdate).toHaveBeenCalledTimes(1);
   });
@@ -185,11 +185,67 @@ describe("queued desktop updates", () => {
     expect(h.controller.getSnapshot().status).toBe("prompt");
   });
 
-  it("clears queued state immediately when the update changes", () => {
+  it("replaces a queued restart with a fresh choice when the update changes", () => {
     const h = setup();
     h.controller.queue();
     h.controller.updateChanged({ ...update, downloadedVersion: "1.2.0" });
+    expect(h.controller.getSnapshot()).toMatchObject({
+      status: "prompt",
+      target: { downloadedVersion: "1.2.0" },
+    });
+  });
+
+  it("announces a finished download once, permits dismissal, and reopens on request", () => {
+    const h = setup();
+    h.controller.cancel();
+    h.controller.updateChanged(update);
     expect(h.controller.getSnapshot().status).toBe("idle");
+    h.controller.request(update);
+    expect(h.controller.getSnapshot().status).toBe("prompt");
+    h.controller.cancel();
+    h.controller.updateChanged({ ...update, status: "downloading", downloadedVersion: null });
+    expect(h.controller.getSnapshot().status).toBe("idle");
+    h.controller.updateChanged({ ...update, downloadedVersion: "1.2.0" });
+    expect(h.controller.getSnapshot()).toMatchObject({
+      status: "prompt",
+      target: { downloadedVersion: "1.2.0" },
+    });
+    expect(h.installUpdate).not.toHaveBeenCalled();
+  });
+
+  it("automatically presents a download on initial state hydration without installing", () => {
+    const input = setup();
+    const controller = createDesktopUpdateInstallController(input);
+    controller.updateChanged({ ...update, status: "downloading", downloadedVersion: null });
+    expect(controller.getSnapshot().status).toBe("idle");
+    controller.updateChanged(update);
+    expect(controller.getSnapshot().status).toBe("prompt");
+    expect(input.installUpdate).not.toHaveBeenCalled();
+  });
+
+  it("can announce the same download after the coordinator remounts", () => {
+    const h = setup();
+    h.controller.dispose();
+    h.controller.updateChanged(update);
+    expect(h.controller.getSnapshot().status).toBe("prompt");
+    expect(h.installUpdate).not.toHaveBeenCalled();
+  });
+
+  it("cancels the queued restart while keeping its choices available", async () => {
+    const h = setup(true);
+    h.controller.queue();
+    h.controller.cancelRestart();
+    await settle();
+    expect(h.installUpdate).not.toHaveBeenCalled();
+    expect(h.controller.getSnapshot().status).toBe("prompt");
+  });
+
+  it("can restart immediately after queueing, even while agents are busy", async () => {
+    const h = setup();
+    h.controller.queue();
+    h.controller.restartNow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.installUpdate).toHaveBeenCalledTimes(1);
   });
 });
 
