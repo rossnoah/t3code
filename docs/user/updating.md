@@ -23,16 +23,19 @@ to allow recovery without a connected client.
 
 ## Queue a desktop restart
 
-After downloading a desktop update, click the update button in the sidebar or
-Settings and choose **Restart when agents finish**. Keep the app open. It waits
-for agents in all environments hosted by that desktop app, including WSL, to
-finish before restarting. Agents waiting for approval or input and background
-agent work keep the restart queued. Disconnected environments must reconnect
-before the app can confirm they are idle.
+Desktop updates download automatically in the background. When an update is
+ready, choose **See changes**, **Restart when idle**, or **Restart** in the update
+notice. Dismissing the notice keeps the download ready; reopen it from the update
+button in the sidebar or Settings.
 
-Use **Cancel restart** in the queued update notice to cancel, or choose
-**Restart now** in the update dialog to install immediately. Terminal commands
-may still be interrupted. Closing or reloading the app cancels the queue.
+**Restart when idle** waits for agents in all environments hosted by that desktop
+app, including WSL, to finish. Agents waiting for approval or input and background
+agent work keep the restart queued. Disconnected environments must reconnect
+before the app can confirm they are idle. Keep the app open while waiting.
+
+Use **Cancel restart** to cancel the queued restart, or **Restart** to install
+immediately. Terminal commands may still be interrupted. Closing or reloading
+the app cancels the queue.
 
 ## Update a connected server
 
