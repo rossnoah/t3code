@@ -31,6 +31,7 @@ import {
 } from "~/lib/projectScriptKeybindings";
 import { keybindingFromKeyboardEvent } from "~/components/settings/KeybindingsSettings.logic";
 import { commandForProjectScript, nextProjectScriptId } from "~/projectScripts";
+import { getComposerPromptLengthValidationMessage } from "./chat/composerSubmission";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -83,6 +84,7 @@ export function ScriptIcon({
 export interface NewProjectScriptInput {
   name: string;
   command: string;
+  kind?: "command" | "prompt";
   icon: ProjectScriptIcon;
   runOnWorktreeCreate: boolean;
   /** Setup scripts only: hold the agent until the script exits. */
@@ -123,13 +125,15 @@ export function editorRequestForScript(
     scriptId: script.id,
     initial: {
       name: script.name,
-      command: script.command,
+      command: script.kind === "prompt" ? script.prompt : script.command,
+      kind: script.kind ?? "command",
       icon: script.icon,
       runOnWorktreeCreate: script.runOnWorktreeCreate,
-      waitForSetup: script.runOnWorktreeCreate && script.async === false,
+      waitForSetup:
+        script.kind !== "prompt" && script.runOnWorktreeCreate && script.async === false,
       keybinding: keybindingValueForCommand(keybindings, commandForProjectScript(script.id)),
-      previewUrl: script.previewUrl ?? null,
-      autoOpenPreview: script.autoOpenPreview ?? false,
+      previewUrl: script.kind === "prompt" ? null : (script.previewUrl ?? null),
+      autoOpenPreview: script.kind !== "prompt" && (script.autoOpenPreview ?? false),
     },
   };
 }
@@ -159,6 +163,7 @@ export function ProjectScriptEditorDialog({
   const formId = React.useId();
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
+  const [kind, setKind] = useState<"command" | "prompt">("command");
   const [icon, setIcon] = useState<ProjectScriptIcon>("play");
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const [runOnWorktreeCreate, setRunOnWorktreeCreate] = useState(false);
@@ -190,6 +195,7 @@ export function ProjectScriptEditorDialog({
     if (!request) return;
     setName(request.initial.name);
     setCommand(request.initial.command);
+    setKind(request.initial.kind ?? "command");
     setIcon(request.initial.icon);
     setIconPickerOpen(false);
     setRunOnWorktreeCreate(request.initial.runOnWorktreeCreate);
@@ -230,8 +236,16 @@ export function ProjectScriptEditorDialog({
       return;
     }
     if (trimmedCommand.length === 0) {
-      setValidationError("Command is required.");
+      setValidationError(kind === "prompt" ? "Prompt is required." : "Command is required.");
       return;
+    }
+
+    if (kind === "prompt") {
+      const promptError = getComposerPromptLengthValidationMessage(trimmedCommand);
+      if (promptError) {
+        setValidationError(promptError);
+        return;
+      }
     }
 
     setValidationError(null);
@@ -251,12 +265,13 @@ export function ProjectScriptEditorDialog({
       payload = {
         name: trimmedName,
         command: trimmedCommand,
+        kind,
         icon,
-        runOnWorktreeCreate,
-        waitForSetup: runOnWorktreeCreate && waitForSetup,
+        runOnWorktreeCreate: kind === "command" && runOnWorktreeCreate,
+        waitForSetup: kind === "command" && runOnWorktreeCreate && waitForSetup,
         keybinding: keybindingRule?.key ?? null,
-        previewUrl: trimmedPreviewUrl.length > 0 ? trimmedPreviewUrl : null,
-        autoOpenPreview: trimmedPreviewUrl.length > 0 ? autoOpenPreview : false,
+        previewUrl: kind === "command" && trimmedPreviewUrl.length > 0 ? trimmedPreviewUrl : null,
+        autoOpenPreview: kind === "command" && trimmedPreviewUrl.length > 0 && autoOpenPreview,
       } satisfies NewProjectScriptInput;
     } catch (error) {
       setValidationError(error instanceof Error ? error.message : "Failed to save action.");
@@ -304,7 +319,8 @@ export function ProjectScriptEditorDialog({
           <DialogHeader>
             <DialogTitle>{isEditing ? "Edit Action" : "Add Action"}</DialogTitle>
             <DialogDescription>
-              Actions are project-scoped commands you can run from the top bar or keybindings.
+              Save a command or prompt to run from the top bar or a keybinding in any thread in this
+              project.
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>
@@ -376,57 +392,92 @@ export function ProjectScriptEditorDialog({
                   </p>
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="script-command">Command</Label>
+                  <Label>Action type</Label>
+                  <div className="flex gap-2" role="group" aria-label="Action type">
+                    <Button
+                      type="button"
+                      variant={kind === "command" ? "secondary" : "outline"}
+                      aria-pressed={kind === "command"}
+                      onClick={() => setKind("command")}
+                    >
+                      Shell command
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={kind === "prompt" ? "secondary" : "outline"}
+                      aria-pressed={kind === "prompt"}
+                      onClick={() => setKind("prompt")}
+                    >
+                      Prompt
+                    </Button>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="script-command">{kind === "prompt" ? "Prompt" : "Command"}</Label>
                   <Textarea
                     id="script-command"
-                    placeholder="bun test"
+                    placeholder={
+                      kind === "prompt"
+                        ? "Update the Linear ticket with a summary of the work in this thread."
+                        : "bun test"
+                    }
                     value={command}
                     onChange={(event) => setCommand(event.target.value)}
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="script-preview-url">Preview URL (optional)</Label>
-                  <Input
-                    id="script-preview-url"
-                    placeholder="http://localhost:5173"
-                    value={previewUrl}
-                    onChange={(event) => setPreviewUrl(event.target.value)}
-                  />
+                {kind === "prompt" && (
                   <p className="text-xs text-muted-foreground">
-                    Open this URL in the in-app preview when this action runs.
+                    Sends this prompt immediately to the current thread using its selected agent.
+                    Your composer draft stays unchanged.
                   </p>
-                </div>
-                <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
-                  <span>Run automatically on worktree creation</span>
-                  <Switch
-                    checked={runOnWorktreeCreate}
-                    onCheckedChange={(checked) => setRunOnWorktreeCreate(Boolean(checked))}
-                  />
-                </label>
-                <label
-                  className={`flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035] ${
-                    runOnWorktreeCreate ? "" : "opacity-60"
-                  }`}
-                >
-                  <span>Wait for it to finish before the agent starts</span>
-                  <Switch
-                    checked={waitForSetup}
-                    disabled={!runOnWorktreeCreate}
-                    onCheckedChange={(checked) => setWaitForSetup(Boolean(checked))}
-                  />
-                </label>
-                <label
-                  className={`flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035] ${
-                    previewUrl.trim().length === 0 ? "opacity-60" : ""
-                  }`}
-                >
-                  <span>Open preview automatically when this action runs</span>
-                  <Switch
-                    checked={autoOpenPreview}
-                    disabled={previewUrl.trim().length === 0}
-                    onCheckedChange={(checked) => setAutoOpenPreview(Boolean(checked))}
-                  />
-                </label>
+                )}
+                {kind === "command" && (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="script-preview-url">Preview URL (optional)</Label>
+                      <Input
+                        id="script-preview-url"
+                        placeholder="http://localhost:5173"
+                        value={previewUrl}
+                        onChange={(event) => setPreviewUrl(event.target.value)}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Open this URL in the in-app preview when this action runs.
+                      </p>
+                    </div>
+                    <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
+                      <span>Run automatically on worktree creation</span>
+                      <Switch
+                        checked={runOnWorktreeCreate}
+                        onCheckedChange={(checked) => setRunOnWorktreeCreate(Boolean(checked))}
+                      />
+                    </label>
+                    <label
+                      className={`flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035] ${
+                        runOnWorktreeCreate ? "" : "opacity-60"
+                      }`}
+                    >
+                      <span>Wait for it to finish before the agent starts</span>
+                      <Switch
+                        checked={waitForSetup}
+                        disabled={!runOnWorktreeCreate}
+                        onCheckedChange={(checked) => setWaitForSetup(Boolean(checked))}
+                      />
+                    </label>
+                    <label
+                      className={`flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035] ${
+                        previewUrl.trim().length === 0 ? "opacity-60" : ""
+                      }`}
+                    >
+                      <span>Open preview automatically when this action runs</span>
+                      <Switch
+                        checked={autoOpenPreview}
+                        disabled={previewUrl.trim().length === 0}
+                        onCheckedChange={(checked) => setAutoOpenPreview(Boolean(checked))}
+                      />
+                    </label>
+                  </>
+                )}
                 {validationError && <p className="text-sm text-destructive">{validationError}</p>}
               </fieldset>
             </form>
