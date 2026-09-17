@@ -1,5 +1,6 @@
-import { createElement } from "react";
+import { act, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 const stageArtworkState = vi.hoisted(() => ({
@@ -65,33 +66,61 @@ function renderRunningActions(hasSendableContent: boolean) {
   );
 }
 
+function sendActions(sendDisabledReason: string | null = null, isRunning = false) {
+  return createElement(ComposerPrimaryActions, {
+    compact: true,
+    pendingAction: null,
+    isRunning,
+    showPlanFollowUpPrompt: false,
+    promptHasText: true,
+    isSendBusy: false,
+    sendDisabledReason,
+    isConnecting: false,
+    isEnvironmentUnavailable: false,
+    isPreparingWorktree: false,
+    hasSendableContent: true,
+    onPreviousPendingQuestion: () => {},
+    onInterrupt: () => {},
+    onImplementPlanInNewThread: () => {},
+  });
+}
+
 function renderSendButton(sendDisabledReason: string | null = null) {
-  return renderToStaticMarkup(
-    createElement(ComposerPrimaryActions, {
-      compact: true,
-      pendingAction: null,
-      isRunning: false,
-      showPlanFollowUpPrompt: false,
-      promptHasText: true,
-      isSendBusy: false,
-      sendDisabledReason,
-      isConnecting: false,
-      isEnvironmentUnavailable: false,
-      isPreparingWorktree: false,
-      hasSendableContent: true,
-      onPreviousPendingQuestion: () => {},
-      onInterrupt: () => {},
-      onImplementPlanInNewThread: () => {},
-    }),
-  );
+  return renderToStaticMarkup(sendActions(sendDisabledReason));
 }
 
 afterEach(() => {
   stageArtworkState.mode = "none";
   stageArtworkState.variant = null;
+  vi.unstubAllGlobals();
 });
 
 describe("ComposerPrimaryActions", () => {
+  it("preserves the mounted send button across turn transitions instead of reusing it for Stop", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(sendActions());
+      });
+      const mounted = renderer!;
+      const send = mounted.root.findByProps({ "aria-label": "Send message" });
+
+      await act(async () => {
+        mounted.update(sendActions(null, true));
+      });
+      expect(mounted.root.findByProps({ "aria-label": "Queue message" }) === send).toBe(true);
+      expect(mounted.root.findByProps({ "aria-label": "Stop generation" }) === send).toBe(false);
+
+      await act(async () => {
+        mounted.update(sendActions());
+      });
+      expect(mounted.root.findByProps({ "aria-label": "Send message" }) === send).toBe(true);
+    } finally {
+      await act(async () => renderer?.unmount());
+    }
+  });
+
   it("disables and labels the send button while feedback is uploading", () => {
     const markup = renderSendButton("Sending feedback");
 
