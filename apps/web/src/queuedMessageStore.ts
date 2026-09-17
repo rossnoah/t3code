@@ -7,6 +7,7 @@ import type {
 import { create } from "zustand";
 
 import type { LocalDispatchSnapshot } from "./components/ChatView.logic";
+import type { ComposerSubmissionIntent } from "./composer-logic";
 import type { ComposerFileAttachment, ComposerImageAttachment } from "./composerDraftStore";
 import type { TerminalContextDraft } from "./lib/terminalContext";
 import { randomUUID } from "./lib/utils";
@@ -40,20 +41,9 @@ export interface QueuedComposerMessage {
   reviewComments: ReviewCommentContext[];
   sendSettings: QueuedMessageSendSettings;
   /**
-   * The newest completed tool activity at queue time. A different id later
-   * means a tool call finished after the user queued, which is the boundary
-   * the message goes out on.
-   */
-  queuedAfterToolActivityId: string | null;
-  /**
-   * Set when the message was created by Stop or a failed restore, not by the
-   * user pressing send. It waits for Send now instead of leaving on its own.
-   */
-  holdUntilUserAction?: boolean;
-  /**
-   * Set while a send is under way; the row stays until it settles. Stop can
-   * still take a "preparing" message back (uploads, thread settings), but not
-   * a "dispatching" one, whose turn start is already on the wire.
+   * Set while a send is under way; the row stays until it settles. Pausing
+   * can still take a "preparing" message back (uploads, thread settings), but
+   * not a "dispatching" one, whose turn start is already on the wire.
    */
   sending?: "preparing" | "dispatching";
   createdAt: string;
@@ -75,31 +65,39 @@ interface QueuedDispatch {
 interface QueuedMessageStoreState {
   queuesByThreadKey: Record<string, QueuedComposerMessage[]>;
   lastDispatchByThreadKey: Record<string, QueuedDispatch>;
+  pausedByThreadKey: Record<string, boolean>;
+  // Remember the completion that handed off to a queued send, even after
+  // finishSend removes the last message and before notification effects observe it.
+  suppressedCompletionByThreadKey: Record<string, number>;
+  /** The thread whose queue is being dragged or edited. Nothing leaves it meanwhile. */
+  interactingThreadKey: string | null;
   enqueue: (threadKey: string, message: Omit<QueuedComposerMessage, "id">) => QueuedComposerMessage;
   /**
    * Marks one message as sending and returns it, or null when it is gone or
-   * the thread already has a send under way. The other messages are
-   * re-anchored to `toolActivityId` so only one leaves per tool boundary.
+   * the thread already has a send under way. `completedAt` is the finished
+   * turn this send follows, whose completion alert it replaces.
    */
   beginSend: (
     threadKey: string,
     id: string,
-    toolActivityId: string | null,
+    completedAt: string | null,
   ) => QueuedComposerMessage | null;
-  /** The turn start is going out. False when Stop took the message back first. */
+  /** The turn start is going out. False when a pause took the message back first. */
   markDispatching: (threadKey: string, id: string, thread: LocalDispatchSnapshot) => boolean;
   /** Drops a message whose send went out, or that had nothing left to send. */
   finishSend: (threadKey: string, id: string) => void;
   /**
-   * Moves a message whose send failed back to the head, held for user action.
-   * The queue keeps its order and nothing behind it overtakes. False when
-   * Stop already took the message back.
+   * Moves a message whose send failed back to the head and pauses the queue,
+   * so nothing behind it overtakes. False when the message is already gone.
    */
   failSend: (threadKey: string, id: string) => boolean;
-  /** Removes one message without touching the others' anchors. Null when gone or sending. */
+  /** Removes one message. Null when gone or sending. */
   remove: (threadKey: string, id: string) => QueuedComposerMessage | null;
-  /** Removes and returns every message for the thread that is not already on the wire. */
-  drain: (threadKey: string) => QueuedComposerMessage[];
+  pause: (threadKey: string) => void;
+  resume: (threadKey: string) => void;
+  updatePrompt: (threadKey: string, id: string, prompt: string) => void;
+  reorder: (threadKey: string, id: string, overId: string) => void;
+  setInteracting: (threadKey: string, active: boolean) => void;
 }
 
 const EMPTY_QUEUE: QueuedComposerMessage[] = [];
@@ -121,7 +119,7 @@ function withQueue(
   return { queuesByThreadKey, lastDispatchByThreadKey };
 }
 
-/** In-memory only: a queued message is a live intent, not a draft worth persisting. */
+/** Queues belong to this client session, scoped to an environment and thread. */
 export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get) => {
   const queueOf = (threadKey: string) => get().queuesByThreadKey[threadKey] ?? EMPTY_QUEUE;
   const update = (
@@ -132,25 +130,31 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
   return {
     queuesByThreadKey: {},
     lastDispatchByThreadKey: {},
+    pausedByThreadKey: {},
+    suppressedCompletionByThreadKey: {},
+    interactingThreadKey: null,
     enqueue: (threadKey, message) => {
       const entry: QueuedComposerMessage = { ...message, id: randomUUID() };
       update(threadKey, [...queueOf(threadKey), entry]);
       return entry;
     },
-    beginSend: (threadKey, id, toolActivityId) => {
+    beginSend: (threadKey, id, completedAt) => {
       const queue = queueOf(threadKey);
       const entry = queue.find((message) => message.id === id);
       if (!entry || queue.some((message) => message.sending)) return null;
       update(
         threadKey,
-        queue.map((message) =>
-          message.id === id
-            ? { ...message, sending: "preparing" }
-            : message.queuedAfterToolActivityId === toolActivityId
-              ? message
-              : { ...message, queuedAfterToolActivityId: toolActivityId },
-        ),
+        queue.map((message) => (message.id === id ? { ...message, sending: "preparing" } : message)),
       );
+      const completion = Date.parse(completedAt ?? "");
+      if (Number.isFinite(completion)) {
+        set((state) => ({
+          suppressedCompletionByThreadKey: {
+            ...state.suppressedCompletionByThreadKey,
+            [threadKey]: completion,
+          },
+        }));
+      }
       return entry;
     },
     markDispatching: (threadKey, id, thread) => {
@@ -187,11 +191,12 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
       const dispatch = get().lastDispatchByThreadKey[threadKey];
       update(
         threadKey,
-        [{ ...rest, holdUntilUserAction: true }, ...queue.filter((message) => message.id !== id)],
+        [rest, ...queue.filter((message) => message.id !== id)],
         dispatch?.messageId !== id
           ? undefined
           : dispatch.previous && { messageId: null, thread: dispatch.previous, previous: null },
       );
+      set((state) => ({ pausedByThreadKey: { ...state.pausedByThreadKey, [threadKey]: true } }));
       return true;
     },
     remove: (threadKey, id) => {
@@ -204,63 +209,89 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
       );
       return entry;
     },
-    drain: (threadKey) => {
-      const queue = queueOf(threadKey);
-      const drained = queue.filter((message) => message.sending !== "dispatching");
-      if (drained.length === 0) return EMPTY_QUEUE;
+    pause: (threadKey) =>
+      set((state) => {
+        // A message still preparing (uploads, thread settings) goes back to
+        // waiting; its send sees that at markDispatching and gives up.
+        const queue = state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE;
+        const hasPreparing = queue.some((message) => message.sending === "preparing");
+        return {
+          pausedByThreadKey: { ...state.pausedByThreadKey, [threadKey]: true },
+          ...(hasPreparing
+            ? withQueue(
+                state,
+                threadKey,
+                queue.map(({ sending, ...message }) =>
+                  sending === "dispatching" ? { ...message, sending } : message,
+                ),
+              )
+            : {}),
+        };
+      }),
+    resume: (threadKey) =>
+      set((state) => ({
+        pausedByThreadKey: { ...state.pausedByThreadKey, [threadKey]: false },
+      })),
+    updatePrompt: (threadKey, id, prompt) =>
       update(
         threadKey,
-        queue.filter((message) => message.sending === "dispatching"),
-      );
-      return drained;
+        queueOf(threadKey).map((message) =>
+          message.id === id && !message.sending ? { ...message, prompt } : message,
+        ),
+      ),
+    reorder: (threadKey, id, overId) => {
+      const queue = queueOf(threadKey);
+      if (id === overId) return;
+      const from = queue.findIndex((message) => message.id === id);
+      const to = queue.findIndex((message) => message.id === overId);
+      if (from < 0 || to < 0) return;
+      const reordered = [...queue];
+      reordered.splice(to, 0, ...reordered.splice(from, 1));
+      update(threadKey, reordered);
     },
+    setInteracting: (threadKey, active) =>
+      set((state) =>
+        active
+          ? { interactingThreadKey: threadKey }
+          : state.interactingThreadKey === threadKey
+            ? { interactingThreadKey: null }
+            : {},
+      ),
   };
 });
 
-/**
- * The newest finished tool call. Its id changing is the boundary a queued
- * message goes out on. Live arrays are sorted, but a snapshot loaded from the
- * database is not, so pick by sequence rather than position.
- */
-export function latestCompletedToolActivityId(
-  activities: ReadonlyArray<{
-    readonly id: string;
-    readonly kind: string;
-    readonly sequence?: number | undefined;
-    readonly createdAt: string;
-  }>,
-): string | null {
-  let latest: (typeof activities)[number] | null = null;
-  for (const activity of activities) {
-    if (activity.kind !== "tool.completed") continue;
-    if (
-      latest === null ||
-      (activity.sequence ?? -1) > (latest.sequence ?? -1) ||
-      ((activity.sequence ?? -1) === (latest.sequence ?? -1) &&
-        activity.createdAt > latest.createdAt)
-    ) {
-      latest = activity;
-    }
-  }
-  return latest?.id ?? null;
+/** A paused queue keeps new follow-ups even when immediate steering is enabled. */
+export function shouldQueueFollowUp(input: {
+  isRunning: boolean;
+  hasQueuedMessages: boolean;
+  paused: boolean;
+  followUpBehavior: "queue" | "steer";
+  submissionIntent?: ComposerSubmissionIntent;
+}): boolean {
+  return (
+    (input.isRunning || input.hasQueuedMessages) &&
+    (input.paused ||
+      (input.followUpBehavior === "queue") !== (input.submissionIntent === "alternate"))
+  );
 }
 
-/**
- * A queued message is due mid-turn once a tool call finished after it was
- * queued, and as soon as the turn is over otherwise. "connecting" is the gap
- * between a send and the provider picking it up, so nothing is due there.
- */
+/** Wait for the whole turn. A resumed interrupted session can start a new turn. */
 export function isQueuedMessageDue(input: {
-  message: Pick<QueuedComposerMessage, "queuedAfterToolActivityId" | "holdUntilUserAction">;
+  paused: boolean;
   phase: "connecting" | "running" | "ready" | "disconnected";
-  latestToolActivityId: string | null;
 }): boolean {
-  if (input.message.holdUntilUserAction) return false;
-  if (input.phase === "connecting") return false;
-  if (input.phase !== "running") return true;
-  return input.latestToolActivityId !== input.message.queuedAfterToolActivityId;
+  return !input.paused && input.phase !== "running" && input.phase !== "connecting";
 }
 
 export function useQueuedMessages(threadKey: string): QueuedComposerMessage[] {
   return useQueuedMessageStore((state) => state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE);
+}
+
+/** Read at notification time; draining or deleting a queue must not replay old alerts. */
+export function isQueuedCompletionSuppressed(threadKey: string, completedAt: number): boolean {
+  const state = useQueuedMessageStore.getState();
+  return (
+    (state.queuesByThreadKey[threadKey]?.length ?? 0) > 0 ||
+    state.suppressedCompletionByThreadKey[threadKey] === completedAt
+  );
 }
