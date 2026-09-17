@@ -70,6 +70,11 @@ export function projectScriptRuntimeEnv(
   return env;
 }
 
-export function setupProjectScript(scripts: readonly ProjectScript[]): ProjectScript | null {
-  return scripts.find((script) => script.runOnWorktreeCreate) ?? null;
+export function setupProjectScript(scripts: readonly ProjectScript[]) {
+  return (
+    scripts.find(
+      (script): script is Exclude<ProjectScript, { kind: "prompt" }> =>
+        script.kind !== "prompt" && script.runOnWorktreeCreate,
+    ) ?? null
+  );
 }
