@@ -1092,41 +1092,6 @@ describe("resolveAssistantMessageCopyState", () => {
 });
 
 describe("deriveMessagesTimelineRows", () => {
-  const queuedMessage = (id: string, prompt: string) => ({
-    id,
-    prompt,
-    images: [],
-    files: [],
-    terminalContexts: [],
-    previewAnnotations: [],
-    reviewComments: [],
-    submissionIntent: "foreground" as const,
-    queuedAfterToolActivityId: null,
-    createdAt: "2026-01-01T00:00:01Z",
-  });
-
-  it("appends queued messages after the live rows, marking the oldest as next", () => {
-    const rows = deriveMessagesTimelineRows({
-      timelineEntries: [],
-      isWorking: true,
-      activeTurnStartedAt: "2026-01-01T00:00:00Z",
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-      queuedMessages: [queuedMessage("q1", "first"), queuedMessage("q2", "second")],
-    });
-
-    expect(rows.map((row) => row.kind)).toEqual([
-      "working",
-      "thinking",
-      "queued-message",
-      "queued-message",
-    ]);
-    expect(rows.slice(2)).toMatchObject([
-      { id: "queued-message:q1", isNext: true, queuedMessage: { prompt: "first" } },
-      { id: "queued-message:q2", isNext: false, queuedMessage: { prompt: "second" } },
-    ]);
-  });
-
   it("leads the worktree setup card with the working header", () => {
     const snapshot: WorktreeSetupSnapshot = {
       threadId: ThreadId.make("thread-setup"),
@@ -1206,7 +1171,7 @@ describe("deriveMessagesTimelineRows", () => {
 
     // A failed setup never handed off, so the card stays under the send. The
     // rest of the timeline is untouched: a running send still gets its
-    // working and thinking rows, and queued follow-ups still trail.
+    // working and thinking rows.
     const withMessages = deriveMessagesTimelineRows({
       timelineEntries: [userEntry, assistantEntry],
       isWorking: true,
@@ -1214,7 +1179,6 @@ describe("deriveMessagesTimelineRows", () => {
       turnDiffSummaries: [],
       supportsConversationRollback: false,
       worktreeSetup: { ...snapshot, phase: "failed" },
-      queuedMessages: [queuedMessage("q1", "later")],
     });
     expect(withMessages.map((row) => row.kind)).toEqual([
       "message",
@@ -1222,24 +1186,7 @@ describe("deriveMessagesTimelineRows", () => {
       "working",
       "message",
       "thinking",
-      "queued-message",
     ]);
-    const runningWithQueue = deriveMessagesTimelineRows({
-      timelineEntries: [userEntry],
-      isWorking: true,
-      activeTurnStartedAt: "2026-01-01T00:00:00Z",
-      turnDiffSummaries: [],
-      supportsConversationRollback: false,
-      worktreeSetup: snapshot,
-      queuedMessages: [queuedMessage("q1", "later")],
-    });
-    expect(runningWithQueue.map((row) => row.kind)).toEqual([
-      "message",
-      "working",
-      "worktree-setup",
-      "queued-message",
-    ]);
-
     // Once the agent stage is done and the turn is live, a still-running
     // script leaves the timeline; the working header surfaces it instead.
     const stage = (id: "agent" | "setup-script", status: "done" | "running") =>

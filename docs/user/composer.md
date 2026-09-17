@@ -31,15 +31,23 @@ See [images and videos](#images-and-videos-in-messages) for previewing and savin
 
 ## Send while the agent is working
 
-On web and desktop, a message sent during a running turn waits at the end of the conversation as a
-dashed bubble. It goes out on its own when the agent finishes its next tool
-call, or when the turn ends. Use the arrow under the bubble to send it right
-away, or the X to move it back into the composer. Stop returns every queued
-message to the composer.
+On web and desktop, messages sent while the agent is working appear in the queue
+above the composer. Each waits for the full turn to finish before the next starts.
+Stop pauses the queue and keeps its messages; choose **Resume** to continue.
+You can also pause the queue without stopping the current turn.
+
+Drag messages to change their order, edit them, or delete them. The up arrow sends
+one message immediately, steering the current turn when the provider supports it.
+Sending one message immediately does not resume a paused queue. New messages join
+any remaining queued messages in order.
+
+Queues stay in the current client session and send while that thread is open.
+They are not shared between devices or preserved when the client reloads.
 
 In **Settings → General → Follow-up behavior**, choose **Queue** to keep this
 behavior or **Steer** to send new messages immediately. This setting applies to
-the current client. Messages already queued keep their place.
+the current client. Messages already queued keep their place. While the queue is
+paused, new messages join it even with **Steer** selected.
 
 Use `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` on Windows and Linux to send
 the oldest queued message now. Change `thread.steerQueuedMessage` in
