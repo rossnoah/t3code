@@ -10,6 +10,47 @@ export interface ProviderModelItem extends ModelSlugItem {
   readonly instanceId: ProviderInstanceId;
 }
 
+interface FavoriteModel {
+  readonly provider: ProviderInstanceId;
+  readonly model: string;
+}
+
+/** Swap visible neighbors without disturbing favorites hidden by the current picker. */
+export function reorderFavoriteModels(
+  favorites: ReadonlyArray<FavoriteModel>,
+  modelKey: string,
+  targetKey: string,
+): ReadonlyArray<FavoriteModel> {
+  const index = favorites.findIndex((f) => providerModelKey(f.provider, f.model) === modelKey);
+  const targetIndex = favorites.findIndex(
+    (f) => providerModelKey(f.provider, f.model) === targetKey,
+  );
+  if (index < 0 || targetIndex < 0 || index === targetIndex) return favorites;
+  const next = [...favorites];
+  [next[index], next[targetIndex]] = [next[targetIndex]!, next[index]!];
+  return next;
+}
+
+/** Keep other instances' favorites in place when editing one instance in Settings. */
+export function replaceProviderFavoriteModels(
+  favorites: ReadonlyArray<FavoriteModel>,
+  instanceId: ProviderInstanceId,
+  models: ReadonlyArray<string>,
+): FavoriteModel[] {
+  const remaining = [...new Set(models)];
+  const retained = new Set(remaining);
+  const next: FavoriteModel[] = [];
+  for (const favorite of favorites) {
+    if (favorite.provider !== instanceId) {
+      next.push(favorite);
+    } else if (retained.has(favorite.model)) {
+      const model = remaining.shift();
+      if (model !== undefined) next.push({ provider: instanceId, model });
+    }
+  }
+  return [...next, ...remaining.map((model) => ({ provider: instanceId, model }))];
+}
+
 export function providerModelKey(instanceId: ProviderInstanceId, slug: string): string {
   return `${instanceId}:${slug}`;
 }
@@ -37,16 +78,23 @@ export function sortModelsForProviderInstance<T extends ModelSlugItem>(
   options?: {
     readonly modelOrder?: ReadonlyArray<string>;
     readonly favoriteModels?: ReadonlySet<string> | ReadonlyArray<string>;
+    readonly favoriteModelOrder?: ReadonlyArray<string>;
     readonly groupFavorites?: boolean;
   },
 ): T[] {
   const modelOrder = options?.modelOrder ?? [];
   const favoriteModels = toSet(options?.favoriteModels);
   const orderBySlug = rankByValue(modelOrder);
+  const favoriteOrder = rankByValue(options?.favoriteModelOrder ?? []);
   const originalOrder = rankByValue(Arr.map(models, (model) => model.slug));
   const orders: Array<Order.Order<T>> = [
     ...(options?.groupFavorites === true
-      ? [byTrueFirst<T>((model) => favoriteModels.has(model.slug))]
+      ? [
+          byTrueFirst<T>((model) => favoriteModels.has(model.slug)),
+          byOptionalRank<T>((model) =>
+            favoriteModels.has(model.slug) ? favoriteOrder.get(model.slug) : undefined,
+          ),
+        ]
       : []),
     byOptionalRank((model) => orderBySlug.get(model.slug)),
     byOptionalRank((model) => originalOrder.get(model.slug)),
@@ -59,11 +107,13 @@ export function sortProviderModelItems<T extends ProviderModelItem>(
   items: ReadonlyArray<T>,
   options?: {
     readonly favoriteModelKeys?: ReadonlySet<string> | ReadonlyArray<string>;
+    readonly favoriteModelOrder?: ReadonlyArray<string>;
     readonly groupFavorites?: boolean;
     readonly instanceOrder?: ReadonlyArray<ProviderInstanceId>;
   },
 ): T[] {
   const favoriteModelKeys = toSet(options?.favoriteModelKeys);
+  const favoriteOrder = rankByValue(options?.favoriteModelOrder ?? []);
   const instanceOrder = new Map(
     Arr.map(options?.instanceOrder ?? [], (instanceId, index) => [instanceId, index] as const),
   );
@@ -78,6 +128,7 @@ export function sortProviderModelItems<T extends ProviderModelItem>(
           ),
         ]
       : []),
+    byOptionalRank((item) => favoriteOrder.get(providerModelKey(item.instanceId, item.slug))),
     byOptionalRank((item) => instanceOrder.get(item.instanceId)),
     byOptionalRank((item) => originalOrder.get(providerModelKey(item.instanceId, item.slug))),
   ];
