@@ -42,6 +42,7 @@ export function createDesktopUpdateInstallController(input: {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const listeners = new Set<() => void>();
   let activityRevision = 0;
+  let announcedTarget: string | undefined;
 
   const clearTimer = () => {
     clearTimeout(timer);
@@ -120,6 +121,7 @@ export function createDesktopUpdateInstallController(input: {
     },
     request: (update: DesktopUpdateState) => {
       if (state.status !== "idle" || resolveDesktopUpdateButtonAction(update) !== "install") return;
+      announcedTarget = `${update.channel}:${update.downloadedVersion}`;
       publish({ status: "prompt", target: update });
     },
     queue: () => {
@@ -128,8 +130,14 @@ export function createDesktopUpdateInstallController(input: {
       activityChanged();
     },
     restartNow: () => {
-      if (state.status !== "prompt") return;
+      if (state.status !== "prompt" && state.status !== "queued") return;
+      clearTimer();
       void install(state, false);
+    },
+    cancelRestart: () => {
+      if (state.status !== "queued") return;
+      clearTimer();
+      publish({ status: "prompt", target: state.target });
     },
     cancel,
     activityChanged,
@@ -142,17 +150,33 @@ export function createDesktopUpdateInstallController(input: {
         publish({ status: "idle" });
         input.onError(update.message ?? "The update could not be installed. Please try again.");
       } else if (
-        state.status === "queued" &&
+        (state.status === "queued" || state.status === "prompt") &&
         (!update.enabled ||
           update.channel !== state.target.channel ||
           update.downloadedVersion !== state.target.downloadedVersion)
       ) {
+        const wasQueued = state.status === "queued";
         cancel();
-        input.onError("The downloaded update changed. Choose the update again to restart.");
+        if (wasQueued) {
+          input.onError("The downloaded update changed. Choose the update again to restart.");
+        }
       }
+      const targetKey = `${update.channel}:${update.downloadedVersion}`;
+      if (
+        state.status === "idle" &&
+        update.enabled &&
+        update.status === "downloaded" &&
+        update.downloadedVersion &&
+        announcedTarget !== targetKey
+      ) {
+        announcedTarget = targetKey;
+        publish({ status: "prompt", target: update });
+      }
+      if (state.status === "queued" && update.status === "downloaded") activityChanged();
     },
     dispose: () => {
       clearTimer();
+      announcedTarget = undefined;
       publish({ status: "idle" });
     },
   };

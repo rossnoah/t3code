@@ -5,6 +5,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as PlatformError from "effect/PlatformError";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -21,6 +22,18 @@ import * as DesktopUpdates from "./DesktopUpdates.ts";
 
 export const flushCallbacks = Effect.yieldNow;
 
+export const waitForUpdateState = Effect.fn("test.waitForUpdateState")(function* (
+  predicate: (state: DesktopUpdateState) => boolean,
+) {
+  const updates = yield* DesktopUpdates.DesktopUpdates;
+  const { latest, changes } = yield* updates.subscribe;
+  if (predicate(latest)) return latest;
+  return Option.getOrThrow(yield* changes.pipe(Stream.filter(predicate), Stream.runHead));
+});
+
+export const waitForUpdateStatus = (status: DesktopUpdateState["status"]) =>
+  waitForUpdateState((state) => state.status === status);
+
 export interface UpdatesHarnessOptions {
   readonly checkForUpdates?: Effect.Effect<
     void,
@@ -29,7 +42,7 @@ export interface UpdatesHarnessOptions {
   readonly beforeSetUpdateChannel?: Effect.Effect<void>;
   readonly setUpdateChannelError?: DesktopAppSettings.DesktopSettingsWriteError;
   readonly setDisableDifferentialDownload?: Effect.Effect<void>;
-  readonly downloadUpdate?: Effect.Effect<void>;
+  readonly downloadUpdate?: Effect.Effect<void, ElectronUpdater.ElectronUpdaterDownloadUpdateError>;
   readonly quitAndInstall?: Effect.Effect<void, ElectronUpdater.ElectronUpdaterQuitAndInstallError>;
   readonly stopBackend?: Effect.Effect<void>;
   readonly startBackend?: Effect.Effect<void>;
