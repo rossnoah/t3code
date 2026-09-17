@@ -17,7 +17,8 @@ import {
   startAttachmentUpload,
 } from "../../lib/attachmentUploadQueue";
 import { newMessageId } from "../../lib/utils";
-import { latestCompletedToolActivityId, useQueuedMessageStore } from "../../queuedMessageStore";
+import { useQueuedMessageStore } from "../../queuedMessageStore";
+import { derivePhase } from "../../session-logic";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { readThread, readThreadShell } from "../../state/entities";
 import { environmentServerConfigsAtom } from "../../state/server";
@@ -43,7 +44,7 @@ async function run<W, A, E>(command: AtomCommand<W, A, E>, input: W): Promise<A>
  * Sends one queued message as a turn on its thread. `QueuedMessageSender`
  * calls it when the head message is due, and Send now calls it directly. It
  * reads nothing from the composer, so it works for threads that are not on
- * screen. A failed send stays at the head of the queue, held for Send now.
+ * screen. A failed send returns to the head of the queue and pauses it.
  */
 export async function sendQueuedMessage(
   threadRef: ScopedThreadRef,
@@ -52,10 +53,15 @@ export async function sendQueuedMessage(
   const { environmentId, threadId } = threadRef;
   const threadKey = scopedThreadKey(threadRef);
   const queue = useQueuedMessageStore.getState();
+  const current = readThread(threadRef);
+  // A send after the turn finished takes over that turn's completion alert;
+  // Send now during a running turn steers it and leaves the alert alone.
   const message = queue.beginSend(
     threadKey,
     messageId,
-    latestCompletedToolActivityId(readThread(threadRef)?.activities ?? []),
+    derivePhase(current?.session ?? null) === "running"
+      ? null
+      : (current?.latestTurn?.completedAt ?? null),
   );
   if (!message) return;
   const { sendSettings } = message;
@@ -80,7 +86,7 @@ export async function sendQueuedMessage(
       elementContextCount: message.previewAnnotations.length + message.reviewComments.length,
     });
     // Only expired terminal context was left. Retrying would block the queue
-    // on every boundary, so drop it and let the queue move on.
+    // after every turn, so drop it and let the queue move on.
     if (!hasSendableContent) {
       queue.finishSend(threadKey, message.id);
       return;
@@ -160,8 +166,8 @@ export async function sendQueuedMessage(
       });
     }
 
-    // Stop hands a preparing message back to the composer. Past this point
-    // the send can no longer be taken back.
+    // Pausing (or Stop) hands a preparing message back to the queue. Past
+    // this point the send can no longer be taken back.
     const thread = readThread(threadRef) ?? undefined;
     if (!queue.markDispatching(threadKey, message.id, createLocalDispatchSnapshot(thread))) return;
     const context = buildMessageContext({
@@ -205,7 +211,7 @@ export async function sendQueuedMessage(
     toastManager.add({
       type: "error",
       title: title ? `Queued message not sent in "${title}"` : "Queued message not sent",
-      description: error instanceof Error ? error.message : "Use Send now to try again.",
+      description: error instanceof Error ? error.message : "Resume the queue to try again.",
     });
   }
 }
