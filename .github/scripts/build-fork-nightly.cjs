@@ -56,11 +56,22 @@ async function checkFork() {
     "apps/web/src/components/ThreadNotificationCoordinator.test.tsx",
     "apps/web/src/state/desktopUpdateInstall.test.ts",
     "apps/web/src/state/desktopUpdateInstallController.test.ts",
+    "apps/web/src/components/desktopUpdate.logic.test.ts",
+    "apps/web/src/components/desktopUpdate.toast.test.tsx",
+    "apps/web/src/components/sidebar/SidebarUpdateReleaseNotes.test.tsx",
     "apps/web/src/projectScripts.test.ts",
     "apps/web/src/components/projectScriptEditor.test.tsx",
     "packages/contracts/src/projectScript.test.ts",
     "apps/server/src/project/ProjectSetupScriptRunner.test.ts",
     "scripts/build-desktop-artifact.test.ts",
+  ]);
+  // Install once before desktop tests import Electron from parallel workers.
+  await runCheck("node", ["apps/desktop/scripts/ensure-electron-runtime.mjs"]);
+  await runCheck("vp", [
+    "test",
+    "run",
+    "apps/desktop/src/updates/DesktopUpdates.test.ts",
+    "apps/desktop/src/updates/DesktopRemoteUpdates.test.ts",
   ]);
   await runCheck("vp", [
     "test",
