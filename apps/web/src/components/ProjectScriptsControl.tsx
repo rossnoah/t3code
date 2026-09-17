@@ -95,7 +95,7 @@ export default function ProjectScriptsControl({
         (fileScript) =>
           !scripts.some(
             (script) =>
-              script.command === fileScript.command ||
+              (script.kind !== "prompt" && script.command === fileScript.command) ||
               script.name.toLowerCase() === fileScript.name.toLowerCase(),
           ),
       ),
