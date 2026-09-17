@@ -8,6 +8,16 @@ function model(slug: string, isCustom = false): ServerProviderModel {
 }
 
 describe("groupModelsForDisplay", () => {
+  it("matches the picker's favorite order independently of other model preferences", () => {
+    const display = groupModelsForDisplay([model("a"), model("b"), model("c"), model("d")], {
+      favoriteModels: new Set(["a", "c"]),
+      favoriteModelOrder: ["c", "a"],
+      hiddenModels: new Set(["b"]),
+      modelOrder: ["a", "b", "d", "c"],
+    });
+    expect(display.map((entry) => entry.slug)).toEqual(["c", "a", "d", "b"]);
+  });
+
   it("lists favorites first, then visible models in user order, then hidden ones", () => {
     const models = [model("a"), model("b"), model("c"), model("d"), model("custom", true)];
 
