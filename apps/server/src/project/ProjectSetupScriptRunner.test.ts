@@ -134,6 +134,14 @@ describe("ProjectSetupScriptRunner", () => {
           ServerSettings.layerTest({
             defaultProjectScripts: [
               {
+                id: "update-ticket",
+                name: "Update ticket",
+                kind: "prompt",
+                prompt: "Update Linear with this thread's progress.",
+                icon: "play",
+                runOnWorktreeCreate: false,
+              },
+              {
                 id: "default-setup",
                 name: "Setup",
                 command: "npm install",
@@ -145,6 +153,32 @@ describe("ProjectSetupScriptRunner", () => {
         ),
       ),
     );
+  });
+
+  it.effect("does not execute prompt actions during worktree setup", () => {
+    const open = vi.fn(() => Effect.die("unexpected open"));
+    const write = vi.fn(() => Effect.die("unexpected write"));
+    const project = makeProject([
+      {
+        id: "update-ticket",
+        name: "Update ticket",
+        kind: "prompt",
+        prompt: "Update Linear with this thread's progress.",
+        icon: "play",
+        runOnWorktreeCreate: false,
+      },
+    ]);
+    return Effect.gen(function* () {
+      const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+      const result = yield* runner.runForThread({
+        threadId: "thread-1",
+        projectId: "project-1",
+        worktreePath: "/repo/worktrees/a",
+      });
+      expect(result).toEqual({ status: "no-script" });
+      expect(open).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(testLayer(project, { open, write })));
   });
 
   it.effect("returns no-script when no setup script exists", () => {

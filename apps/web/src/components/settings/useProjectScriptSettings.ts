@@ -178,7 +178,7 @@ export function useProjectScriptSettings(
         const updated = current.map((script) =>
           script.id === id
             ? next
-            : input.runOnWorktreeCreate
+            : input.runOnWorktreeCreate && script.runOnWorktreeCreate
               ? { ...script, runOnWorktreeCreate: false }
               : script,
         );
