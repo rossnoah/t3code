@@ -7,5 +7,9 @@ export function shouldShowPreviewEmptyState(snapshot: PreviewSessionSnapshot | n
 export function getConfiguredPreviewUrls(
   scripts: ReadonlyArray<ProjectScript> | undefined,
 ): ReadonlyArray<string> {
-  return scripts?.flatMap((script) => (script.previewUrl ? [script.previewUrl] : [])) ?? [];
+  return (
+    scripts?.flatMap((script) =>
+      script.kind !== "prompt" && script.previewUrl ? [script.previewUrl] : [],
+    ) ?? []
+  );
 }
