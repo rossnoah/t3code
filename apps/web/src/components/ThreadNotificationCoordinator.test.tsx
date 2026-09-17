@@ -78,6 +78,7 @@ vi.mock("./ui/toast", () => ({
   toastManager: { add: state.add, close: state.close },
 }));
 
+import { useQueuedMessageStore } from "../queuedMessageStore";
 import { ThreadNotificationCoordinator } from "./ThreadNotificationCoordinator";
 
 let renderer: ReactTestRenderer | undefined;
@@ -96,6 +97,12 @@ async function complete() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useQueuedMessageStore.setState({
+    queuesByThreadKey: {},
+    pausedByThreadKey: {},
+    pauseGenerationByThreadKey: {},
+    suppressedCompletionByThreadKey: {},
+  });
   Object.assign(state, {
     mode: "off",
     inApp: true,
@@ -130,6 +137,96 @@ afterEach(async () => {
 });
 
 describe("thread notifications", () => {
+  function enqueue(threadKey = "env-1:thread-1") {
+    return useQueuedMessageStore.getState().enqueue(threadKey, {
+      prompt: "Next task",
+      images: [],
+      files: [],
+      terminalContexts: [],
+      previewAnnotations: [],
+      reviewComments: [],
+      submissionIntent: "foreground",
+      createdAt: "2026-09-13T09:59:00.000Z",
+    });
+  }
+
+  it.each([true, false])(
+    "suppresses intermediate completion alerts with focus=%s, then alerts for the final turn",
+    async (focused) => {
+      state.mode = "notifications-and-sound";
+      state.focused = focused;
+      await render();
+      const message = enqueue();
+      await complete();
+      expect(state.add).not.toHaveBeenCalled();
+      expect(state.notification).not.toHaveBeenCalled();
+      expect(state.sound).not.toHaveBeenCalled();
+
+      useQueuedMessageStore.getState().take("env-1:thread-1", message.id, state.completedAt);
+      await render();
+      expect(state.sound).not.toHaveBeenCalled();
+      state.completedAt = null;
+      await render();
+      state.completedAt = "2026-09-13T10:01:00.000Z";
+      await render();
+      await render();
+      expect(state.sound).toHaveBeenCalledTimes(1);
+      expect(focused ? state.add : state.notification).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("suppresses a completion when the next send takes the last queued message before notification effects run", async () => {
+    state.mode = "notifications-and-sound";
+    await render();
+    const message = enqueue();
+    useQueuedMessageStore.getState().take("env-1:thread-1", message.id, "2026-09-13T10:00:00.000Z");
+    await complete();
+    expect(state.add).not.toHaveBeenCalled();
+    expect(state.sound).not.toHaveBeenCalled();
+  });
+
+  it("does not replay completion when a paused queue is deleted", async () => {
+    await render();
+    const message = enqueue();
+    useQueuedMessageStore.getState().pause("env-1:thread-1");
+    await complete();
+    useQueuedMessageStore.getState().remove("env-1:thread-1", message.id);
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
+  });
+
+  it.each(["env-2:thread-1", "env-1:thread-2"])("ignores queued work for %s", async (threadKey) => {
+    await render();
+    enqueue(threadKey);
+    await complete();
+    expect(state.add).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["input", "Input needed"],
+    ["approval", "Approval needed"],
+    ["sessionError", "Thread failed"],
+    ["turnError", "Thread failed"],
+  ] as const)("still reports %s while work is queued", async (event, title) => {
+    state.mode = "notifications-and-sound";
+    await render();
+    enqueue();
+    state[event] = true;
+    await render();
+    expect(state.add).toHaveBeenCalledWith(expect.objectContaining({ title }));
+    expect(state.sound).toHaveBeenCalledWith("input", expect.any(Function));
+  });
+
+  it("rechecks queued work before delayed completion audio plays", async () => {
+    state.mode = "notifications-and-sound";
+    await render();
+    await complete();
+    const shouldPlay = state.sound.mock.calls[0]?.[1];
+    expect(shouldPlay()).toBe(true);
+    enqueue();
+    expect(shouldPlay()).toBe(false);
+  });
+
   it("alerts once with system alerts off and opens the completed thread", async () => {
     await render();
     await complete();
