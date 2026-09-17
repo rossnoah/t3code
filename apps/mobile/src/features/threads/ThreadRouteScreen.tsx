@@ -271,6 +271,7 @@ function ThreadRouteContent(
   }, [selectedThread, selectedThreadDetailState]);
   const { selectedThreadCwd } = useSelectedThreadWorktree();
   const composer = useThreadComposerState();
+  const { onSendMessage } = composer;
   const gitState = useSelectedThreadGitState();
   const gitActions = useSelectedThreadGitActions();
   const requests = useSelectedThreadRequests();
@@ -602,6 +603,16 @@ function ThreadRouteContent(
 
   const handleRunProjectScript = useCallback(
     async (script: ProjectScript) => {
+      if (script.kind === "prompt") {
+        const messageId = await onSendMessage(script.prompt);
+        if (messageId === null) {
+          Alert.alert(
+            "Prompt action not sent",
+            "Sending is unavailable right now. Try again when the thread is ready.",
+          );
+        }
+        return;
+      }
       terminalDebugLog("project-script:press", {
         scriptId: script.id,
         command: script.command,
@@ -662,6 +673,7 @@ function ThreadRouteContent(
       });
     },
     [
+      onSendMessage,
       navigation,
       selectedThread,
       selectedThreadDetailWorktreePath,
