@@ -1861,6 +1861,51 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.notInclude(error.message, secret);
   });
 
+  for (const target of ["dmg", "zip"]) {
+    it.effect(
+      `packages signed local-only forks as ${target} with their own identity and update feed`,
+      () =>
+        Effect.gen(function* () {
+          const config = yield* createBuildConfig(
+            "mac",
+            target,
+            "1.2.3-nightly.20260915.101",
+            true,
+            false,
+            undefined,
+            undefined,
+          );
+          const mac = config.mac as Record<string, unknown>;
+          assert.equal(config.appId, "com.rossnoah.t3code");
+          assert.isUndefined(mac.provisioningProfile);
+          assert.isUndefined(mac.entitlements);
+          assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
+          assert.deepStrictEqual(mac.target, target === "dmg" ? ["dmg", "zip"] : ["zip"]);
+          if (target === "zip") assert.notProperty(config, "dmg");
+          assert.deepStrictEqual(config.publish, [
+            {
+              provider: "github",
+              owner: "rossnoah",
+              repo: "t3code",
+              releaseType: "prerelease",
+              channel: "nightly",
+            },
+          ]);
+        }).pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  T3CODE_DESKTOP_APP_ID: "com.rossnoah.t3code",
+                  T3CODE_DESKTOP_UPDATE_REPOSITORY: "rossnoah/t3code",
+                },
+              }),
+            ),
+          ),
+        ),
+    );
+  }
+
   it.effect("adds passkey entitlements and both renderer protocols to signed macOS builds", () =>
     Effect.gen(function* () {
       const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
