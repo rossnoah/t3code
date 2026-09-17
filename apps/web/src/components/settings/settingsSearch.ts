@@ -402,6 +402,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["default workspace mode draft local worktree"],
   },
   {
+    id: "branch-prefix",
+    title: "Branch prefix",
+    to: "/settings/source-control",
+    scope: "project-defaults",
+    searchTerms: ["generated branch name namespace worktree t3code noah"],
+  },
+  {
     id: "start-from-origin",
     title: "Start from origin",
     to: "/settings/general",
