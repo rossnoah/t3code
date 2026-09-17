@@ -756,8 +756,22 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     return mapping.size > 0 ? mapping : EMPTY_MODEL_JUMP_LABELS;
   }, [keybindings, modelJumpCommandByKey, modelJumpShortcutContext]);
   const modelListExtraData = useMemo(
-    () => ({ favoritesSet, modelJumpLabelByKey, activeModelKey, selectedModelKeySet, canReorderFavorites, moveFavorite }),
-    [favoritesSet, modelJumpLabelByKey, activeModelKey, selectedModelKeySet, canReorderFavorites, moveFavorite],
+    () => ({
+      favoritesSet,
+      modelJumpLabelByKey,
+      activeModelKey,
+      selectedModelKeySet,
+      canReorderFavorites,
+      moveFavorite,
+    }),
+    [
+      favoritesSet,
+      modelJumpLabelByKey,
+      activeModelKey,
+      selectedModelKeySet,
+      canReorderFavorites,
+      moveFavorite,
+    ],
   );
 
   useEffect(() => {
