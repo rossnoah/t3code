@@ -98,7 +98,7 @@ export function ProjectActionsSettings() {
         (fileScript) =>
           !scripts.some(
             (script) =>
-              script.command === fileScript.command ||
+              (script.kind !== "prompt" && script.command === fileScript.command) ||
               script.name.toLowerCase() === fileScript.name.toLowerCase(),
           ),
       ),
@@ -136,7 +136,7 @@ export function ProjectActionsSettings() {
         settingKeys={["defaultProjectScripts"]}
         mixed={mixed}
         title="Actions"
-        description="Commands that run in this project's checkout or its worktree, with optional shortcuts."
+        description="Shell commands and prompts you can run in this project, with optional shortcuts."
         onResetOverride={() => void persist(() => null)}
         control={
           <div className="flex flex-wrap items-center gap-1.5">
