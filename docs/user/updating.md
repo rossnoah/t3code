@@ -21,6 +21,19 @@ interrupted, and threads without saved provider resume state need a new message.
 If you previously enabled continuation for updates, enable this setting once
 to allow recovery without a connected client.
 
+## Queue a desktop restart
+
+After downloading a desktop update, click the update button in the sidebar or
+Settings and choose **Restart when agents finish**. Keep the app open. It waits
+for agents in all environments hosted by that desktop app, including WSL, to
+finish before restarting. Agents waiting for approval or input and background
+agent work keep the restart queued. Disconnected environments must reconnect
+before the app can confirm they are idle.
+
+Use **Cancel restart** in the queued update notice to cancel, or choose
+**Restart now** in the update dialog to install immediately. Terminal commands
+may still be interrupted. Closing or reloading the app cancels the queue.
+
 ## Update a connected server
 
 The offered action depends on how the server runs:
