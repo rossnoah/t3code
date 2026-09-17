@@ -84,6 +84,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
 
   const renderStopGenerationButton = (insidePendingAction: boolean) => (
     <button
+      key="stop"
       type="button"
       className={cn(
         "flex cursor-pointer items-center justify-center rounded-full bg-destructive/90 text-white shadow-xs shadow-destructive/24 inset-shadow-[0_1px_--theme(--color-white/16%)] transition-all duration-150 hover:bg-destructive hover:scale-105 active:inset-shadow-[0_1px_--theme(--color-black/8%)] active:shadow-none",
@@ -217,6 +218,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
 
   const sendButton = (
     <button
+      key="send"
       type="submit"
       className={cn(
         "relative isolate flex h-9 w-9 items-center justify-center overflow-hidden rounded-full shadow-xs transition-all duration-150 enabled:cursor-pointer enabled:inset-shadow-[0_1px_--theme(--color-white/16%)] hover:scale-105 active:inset-shadow-[0_1px_--theme(--color-black/8%)] active:shadow-none disabled:pointer-events-none disabled:opacity-30 disabled:shadow-none disabled:hover:scale-100 sm:h-8 sm:w-8",
@@ -273,8 +275,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     return sendButton;
   }
 
-  // While a turn runs, a sendable draft queues for the next tool boundary, so
-  // the send button stays next to Stop on every viewport.
+  // Keep the keyed Send button mounted across turn transitions so keyboard
+  // focus cannot transfer to Stop. While running, Send queues the draft.
   return (
     <>
       {renderStopGenerationButton(false)}
