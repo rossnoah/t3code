@@ -4,6 +4,7 @@ import {
   type ProviderInstanceId,
   type WorktreeSubmodules,
 } from "@t3tools/contracts";
+import { normalizeBranchPrefix } from "@t3tools/shared/git";
 import { createModelSelection } from "@t3tools/shared/model";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useNavigate } from "@tanstack/react-router";
@@ -24,6 +25,7 @@ import { PULL_REQUEST_MERGE_METHOD_LABELS } from "../pullRequest/pullRequestDeta
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { toastManager } from "../ui/toast";
+import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import type { ProjectSettingsCategory } from "./ProjectSettingsPanel";
 import { searchableSetting } from "./settingsSearch";
@@ -78,6 +80,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const mixedWorkspace = useScopedSettingsMixed(["defaultThreadEnvMode"]);
   const mixedSubmodules = useScopedSettingsMixed(["worktreeSubmodules"]);
   const mixedBrowser = useScopedSettingsMixed(["enableAgentBrowserAccess"]);
+  const mixedBranchPrefix = useScopedSettingsMixed(["branchPrefix"]);
   const mixedAutoPull = useScopedSettingsMixed(["defaultAutoPull"]);
   const mixedMergeMethod = useScopedSettingsMixed(["pullRequestMergeMethod"]);
   const modelSource = useScopedSettingSource(["defaultModelSelection"]);
@@ -375,6 +378,42 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
         </>
       ) : category === "source-control" ? (
         <>
+          <SettingsRow
+            serverScoped
+            settingKeys={["branchPrefix"]}
+            mixed={mixedBranchPrefix}
+            {...searchableSetting("branch-prefix")}
+            description="Prefix for generated worktree branch names, such as noah/. Leave blank for no prefix."
+            resetAction={
+              mixedBranchPrefix ||
+              settings.branchPrefix !== DEFAULT_SERVER_SETTINGS.branchPrefix ? (
+                <SettingResetButton
+                  label="branch prefix"
+                  onClick={() =>
+                    updateSettings({ branchPrefix: DEFAULT_SERVER_SETTINGS.branchPrefix })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Input
+                key={`${JSON.stringify(scope)}:${mixedBranchPrefix}:${settings.branchPrefix}`}
+                aria-label="Branch prefix"
+                className="w-44 font-mono"
+                placeholder={mixedBranchPrefix ? "Mixed" : "No prefix"}
+                defaultValue={mixedBranchPrefix ? "" : settings.branchPrefix}
+                onBlur={(event) => {
+                  if (event.currentTarget.value === event.currentTarget.defaultValue) return;
+                  const branchPrefix = normalizeBranchPrefix(event.currentTarget.value);
+                  event.currentTarget.value = branchPrefix;
+                  updateSettings({ branchPrefix });
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") event.currentTarget.blur();
+                }}
+              />
+            }
+          />
           <SettingsRow
             serverScoped
             settingKeys={["defaultAutoPull"]}

@@ -409,6 +409,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["git submodule init recursive top-level none worktree t3.json"],
   },
   {
+    id: "branch-prefix",
+    title: "Branch prefix",
+    to: "/settings/source-control",
+    scope: "project-defaults",
+    searchTerms: ["generated branch name namespace worktree t3code noah"],
+  },
+  {
     id: "start-from-origin",
     title: "Start from origin",
     to: "/settings/general",

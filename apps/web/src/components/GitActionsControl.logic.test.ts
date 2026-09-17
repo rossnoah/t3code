@@ -1093,23 +1093,29 @@ describe("resolveLiveThreadBranchUpdate", () => {
     assert.equal(update, null);
   });
 
-  it("does not regress a semantic thread ref back to a temporary worktree ref", () => {
-    const update = resolveLiveThreadBranchUpdate({
-      threadBranch: "t3code/github-query-rate-limit",
-      gitStatus: status({ refName: "t3code/bda76797" }),
-    });
+  it.each(["t3code/bda76797", "noah/worktree-bda76797", "worktree-bda76797"])(
+    "does not regress a semantic thread ref back to placeholder %s",
+    (temporaryBranch) => {
+      const update = resolveLiveThreadBranchUpdate({
+        threadBranch: "t3code/github-query-rate-limit",
+        gitStatus: status({ refName: temporaryBranch }),
+      });
 
-    assert.equal(update, null);
-  });
+      assert.equal(update, null);
+    },
+  );
 
-  it("allows a temporary worktree ref to reconcile to a semantic branch", () => {
-    const update = resolveLiveThreadBranchUpdate({
-      threadBranch: "t3code/a9628676",
-      gitStatus: status({ refName: "feature/diff-panel-toggle" }),
-    });
+  it.each(["t3code/a9628676", "noah/worktree-a9628676", "worktree-a9628676"])(
+    "reconciles placeholder %s to a semantic branch",
+    (temporaryBranch) => {
+      const update = resolveLiveThreadBranchUpdate({
+        threadBranch: temporaryBranch,
+        gitStatus: status({ refName: "feature/diff-panel-toggle" }),
+      });
 
-    assert.deepEqual(update, { branch: "feature/diff-panel-toggle" });
-  });
+      assert.deepEqual(update, { branch: "feature/diff-panel-toggle" });
+    },
+  );
 });
 
 describe("resolveThreadBranchMetadataPatch", () => {
