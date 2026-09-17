@@ -260,7 +260,7 @@ function useThreadGitHeaderActionItems(props: ThreadGitControlsProps): ThreadGit
         menu: {
           items: [
             ...props.projectScripts.map((script) => ({
-              description: script.command,
+              description: script.kind === "prompt" ? script.prompt : script.command,
               icon: { name: projectScriptMenuIcon(script.icon), type: "sfSymbol" as const },
               label: projectScriptMenuLabel(script),
               onPress: () => void props.onRunProjectScript(script),
@@ -436,7 +436,7 @@ export function ThreadGitControls(props: ThreadGitControlsProps) {
                 key={script.id}
                 icon={projectScriptMenuIcon(script.icon)}
                 onPress={() => void props.onRunProjectScript(script)}
-                subtitle={script.command}
+                subtitle={script.kind === "prompt" ? script.prompt : script.command}
               >
                 <NativeHeaderToolbar.Label>
                   {projectScriptMenuLabel(script)}
