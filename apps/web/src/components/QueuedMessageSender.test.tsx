@@ -73,7 +73,6 @@ function enqueue(overrides: Partial<QueuedComposerMessage> = {}) {
       interactionMode: "default",
       promptEffort: null,
     },
-    queuedAfterToolActivityId: null,
     createdAt: "2026-09-25T00:00:00Z",
     ...overrides,
   });
@@ -84,7 +83,13 @@ const queue = () => useQueuedMessageStore.getState().queuesByThreadKey[threadKey
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  useQueuedMessageStore.setState({ queuesByThreadKey: {}, lastDispatchByThreadKey: {} });
+  useQueuedMessageStore.setState({
+    queuesByThreadKey: {},
+    lastDispatchByThreadKey: {},
+    pausedByThreadKey: {},
+    suppressedCompletionByThreadKey: {},
+    interactingThreadKey: null,
+  });
   io.thread = null;
   io.run.mockReset().mockResolvedValue({ _tag: "Success", value: undefined });
   io.upload.mockReset().mockResolvedValue(undefined);
@@ -152,27 +157,49 @@ describe("QueuedMessageSender", () => {
     await render();
     expect(commandsRun()).toEqual(["start"]);
 
-    // The first message started a turn; the second waits for its next tool call.
+    // The first message started a turn; the second waits for the whole turn,
+    // not just its next tool call.
     io.thread = thread("running", { userMessageIds: ["first"] });
     await render();
-    expect(commandsRun()).toEqual(["start"]);
     io.thread = thread("running", { userMessageIds: ["first"], toolActivityIds: ["tool-1"] });
+    await render();
+    expect(commandsRun()).toEqual(["start"]);
+    io.thread = {
+      ...thread("ready", { userMessageIds: ["first"], toolActivityIds: ["tool-1"] }),
+      latestTurn: { turnId: "turn-1", requestedAt: "t0", startedAt: "t1", completedAt: "t2" },
+    };
     await render();
     expect(commandsRun()).toEqual(["start", "start"]);
   });
 
-  it("moves on to the next message after a failed one is cancelled", async () => {
+  it("holds a paused queue, and one being dragged or edited, until released", async () => {
+    enqueue();
+    io.thread = thread("ready");
+    useQueuedMessageStore.getState().pause(threadKey);
+    useQueuedMessageStore.getState().setInteracting(threadKey, true);
+    await render();
+    await act(() => useQueuedMessageStore.getState().resume(threadKey));
+    expect(commandsRun()).toEqual([]);
+
+    await act(() => useQueuedMessageStore.getState().setInteracting(threadKey, false));
+    expect(commandsRun()).toEqual(["start"]);
+  });
+
+  it("pauses after a failed send and moves on once resumed", async () => {
     io.run.mockResolvedValueOnce({ _tag: "Failure", cause: Cause.fail(new Error("offline")) });
     const first = enqueue({ prompt: "first" });
     enqueue({ prompt: "second" });
     io.thread = thread("ready");
     await render();
-    expect(queue()?.[0]).toMatchObject({ prompt: "first", holdUntilUserAction: true });
+    expect(queue()?.[0]?.prompt).toBe("first");
 
     await act(() => {
       useQueuedMessageStore.getState().remove(threadKey, first.id);
     });
     await render();
+    expect(commandsRun()).toEqual(["start"]);
+
+    await act(() => useQueuedMessageStore.getState().resume(threadKey));
 
     expect(commandsRun()).toEqual(["start", "start"]);
     expect(io.run.mock.calls[1]?.[2]).toMatchObject({ input: { message: { text: "second" } } });
@@ -191,7 +218,7 @@ describe("sendQueuedMessage", () => {
     expect(queue()).toBeUndefined();
   });
 
-  it("gives a message back to Stop while its upload runs, without starting a turn", async () => {
+  it("keeps a message queued when Stop pauses during its upload, without starting a turn", async () => {
     let finishUpload!: () => void;
     io.upload.mockReturnValue(new Promise<void>((resolve) => (finishUpload = resolve)));
     const image = {
@@ -206,26 +233,24 @@ describe("sendQueuedMessage", () => {
     const message = enqueue({ images: [image] });
 
     const sending = sendQueuedMessage(threadRef, message.id);
-    expect(useQueuedMessageStore.getState().drain(threadKey)).toHaveLength(1);
+    useQueuedMessageStore.getState().pause(threadKey);
     finishUpload();
     await sending;
 
     expect(commandsRun()).toEqual([]);
     expect(io.toast).not.toHaveBeenCalled();
-    expect(queue()).toBeUndefined();
+    expect(queue()?.map((entry) => [entry.id, entry.sending])).toEqual([[message.id, undefined]]);
   });
 
-  it("holds a message at the head when the turn start fails", async () => {
+  it("returns a message to the head and pauses when the turn start fails", async () => {
     io.run.mockResolvedValue({ _tag: "Failure", cause: Cause.fail(new Error("offline")) });
     enqueue({ prompt: "first" });
     const second = enqueue({ prompt: "second" });
 
     await sendQueuedMessage(threadRef, second.id);
 
-    expect(queue()?.map((entry) => [entry.prompt, entry.holdUntilUserAction])).toEqual([
-      ["second", true],
-      ["first", undefined],
-    ]);
+    expect(queue()?.map((entry) => entry.prompt)).toEqual(["second", "first"]);
+    expect(useQueuedMessageStore.getState().pausedByThreadKey[threadKey]).toBe(true);
     expect(io.toast).toHaveBeenCalledWith(expect.objectContaining({ description: "offline" }));
   });
 });
