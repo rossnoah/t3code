@@ -16,6 +16,29 @@ import {
 } from "./projectScripts";
 
 describe("projectScripts helpers", () => {
+  it("builds prompt actions without shell, setup, or preview behavior", () => {
+    const action = buildProjectScript("update-ticket", {
+      name: "Update Linear ticket",
+      kind: "prompt",
+      command: "Update the ticket with this thread's progress.",
+      icon: "play",
+      runOnWorktreeCreate: true,
+      waitForSetup: true,
+      previewUrl: "http://localhost:3000",
+      autoOpenPreview: true,
+    });
+    expect(action).toEqual({
+      id: "update-ticket",
+      name: "Update Linear ticket",
+      kind: "prompt",
+      prompt: "Update the ticket with this thread's progress.",
+      icon: "play",
+      runOnWorktreeCreate: false,
+    });
+    expect(setupProjectScript([action])).toBeNull();
+    expect(primaryProjectScript([action])).toBe(action);
+  });
+
   it("builds scripts with preview settings", () => {
     expect(
       buildProjectScript("dev", {
