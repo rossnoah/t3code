@@ -10911,9 +10911,40 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect(
-    "bootstraps first-send worktree turns on the server before dispatching turn start",
-    () =>
+  it.effect.each([
+    {
+      requestedBranch: "t3code/bootstrap-refName",
+      prefix: "noah/",
+      expectedBranch: "t3code/bootstrap-refName",
+      projectPrefix: undefined,
+    },
+    {
+      requestedBranch: "t3code/1234abcd",
+      prefix: "t3code/",
+      expectedBranch: "t3code/1234abcd",
+      projectPrefix: undefined,
+    },
+    {
+      requestedBranch: "t3code/1234abcd",
+      prefix: "noah/",
+      expectedBranch: "noah/worktree-1234abcd",
+      projectPrefix: undefined,
+    },
+    {
+      requestedBranch: "t3code/1234abcd",
+      prefix: "",
+      expectedBranch: "worktree-1234abcd",
+      projectPrefix: undefined,
+    },
+    {
+      requestedBranch: "t3code/1234abcd",
+      prefix: "team/",
+      expectedBranch: "noah/worktree-1234abcd",
+      projectPrefix: "noah/",
+    },
+  ])(
+    "bootstraps first-send worktree turns as $expectedBranch before dispatching turn start",
+    ({ requestedBranch, prefix, expectedBranch, projectPrefix }) =>
       Effect.gen(function* () {
         const dispatchedCommands: Array<OrchestrationCommand> = [];
         const bootstrapGitOperations: string[] = [];
@@ -10922,7 +10953,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             isRepo: true,
             hasPrimaryRemote: true,
             isDefaultRef: false,
-            refName: "t3code/bootstrap-refName",
+            refName: expectedBranch,
             hasWorkingTreeChanges: false,
             workingTree: {
               files: [],
@@ -10972,7 +11003,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               bootstrapGitOperations.push("create-worktree");
               return {
                 worktree: {
-                  refName: "t3code/bootstrap-refName",
+                  refName: expectedBranch,
                   path: "/tmp/bootstrap-worktree",
                 },
               };
@@ -10997,6 +11028,18 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         yield* buildAppUnderTest({
           layers: {
+            serverSettings: {
+              getSettings: Effect.succeed({
+                ...DEFAULT_SERVER_SETTINGS,
+                branchPrefix: prefix,
+                projectSettingsOverrides:
+                  projectPrefix === undefined
+                    ? {}
+                    : {
+                        [defaultProjectId]: { branchPrefix: projectPrefix },
+                      },
+              }),
+            },
             vcsDriver: {
               isInsideWorkTree: () => Effect.succeed(true),
             },
@@ -11056,7 +11099,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 prepareWorktree: {
                   projectCwd: "/tmp/project",
                   baseBranch: "main",
-                  branch: "t3code/bootstrap-refName",
+                  branch: requestedBranch,
                   startFromOrigin: true,
                 },
                 runSetupScript: true,
@@ -11096,10 +11139,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.deepEqual(createWorktree.mock.calls[0]?.[0], {
           cwd: "/tmp/project",
           refName: fetchedOriginCommit,
-          newRefName: "t3code/bootstrap-refName",
+          newRefName: expectedBranch,
           baseRefName: "main",
           path: null,
         });
+        const metadata = dispatchedCommands.find(
+          (command) => command.type === "thread.meta.update",
+        );
+        assertTrue(metadata?.type === "thread.meta.update");
+        if (metadata?.type === "thread.meta.update") assert.equal(metadata.branch, expectedBranch);
         assert.deepEqual(fetchRemote.mock.calls[0]?.[0], {
           cwd: "/tmp/project",
           remoteName: "origin",
