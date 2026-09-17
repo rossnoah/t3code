@@ -2,8 +2,11 @@ import type { VcsStatusRemoteResult, VcsStatusResult } from "@t3tools/contracts"
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  applyTemporaryWorktreeBranchPrefix,
   applyGitStatusStreamEvent,
+  buildGeneratedWorktreeBranchName,
   buildTemporaryWorktreeBranchName,
+  normalizeBranchPrefix,
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
@@ -133,6 +136,34 @@ describe("parseGitHubRepositoryNameWithOwnerFromRemoteUrl", () => {
 });
 
 describe("isTemporaryWorktreeBranch", () => {
+  it.each([
+    ["noah/", "noah/worktree-deadbeef"],
+    ["Team/Noah", "team/noah/worktree-deadbeef"],
+    ["", "worktree-deadbeef"],
+  ])(
+    "recognizes placeholders with prefix %j independently of current settings",
+    (prefix, branch) => {
+      expect(buildTemporaryWorktreeBranchName(() => "deadbeef", prefix)).toBe(branch);
+      expect(isTemporaryWorktreeBranch(branch)).toBe(true);
+      expect(applyTemporaryWorktreeBranchPrefix("t3code/deadbeef", prefix)).toBe(branch);
+      expect(applyTemporaryWorktreeBranchPrefix(branch, "changed/")).toBe(
+        "changed/worktree-deadbeef",
+      );
+    },
+  );
+
+  it("does not treat arbitrary user branches with hex names as placeholders", () => {
+    for (const branch of [
+      "noah/deadbeef",
+      "deadbeef",
+      "feature/worktree-fix",
+      "noah/worktree-deadbeef-extra",
+    ]) {
+      expect(isTemporaryWorktreeBranch(branch)).toBe(false);
+      expect(applyTemporaryWorktreeBranchPrefix(branch, "different/")).toBe(branch);
+    }
+  });
+
   it("matches the generated temporary worktree refName format", () => {
     expect(
       isTemporaryWorktreeBranch(
@@ -240,5 +271,29 @@ describe("applyGitStatusStreamEvent", () => {
       behindCount: 1,
       pr: null,
     });
+  });
+});
+
+describe("generated worktree branch prefixes", () => {
+  it.each([
+    ["noah", "noah/"],
+    [" noah/ ", "noah/"],
+    ["Team//Noah/", "team/noah/"],
+    ["../Noah: Work/~", "noah-work/"],
+    ["", ""],
+  ])("normalizes %j to %j", (input, expected) => {
+    expect(normalizeBranchPrefix(input)).toBe(expected);
+  });
+
+  it.each([
+    ["Fix login", "t3code/", "t3code/fix-login"],
+    ["Fix login", "noah/", "noah/fix-login"],
+    ["refs/heads/noah/fix-login", "noah", "noah/fix-login"],
+    ["t3code/fix-login", "noah/", "noah/fix-login"],
+    ["feature/fix-login", "team/noah/", "team/noah/feature/fix-login"],
+    ["t3code/fix-login", "", "fix-login"],
+    ["!!!", "noah/", "noah/update"],
+  ])("builds %j with prefix %j", (input, prefix, expected) => {
+    expect(buildGeneratedWorktreeBranchName(input, prefix)).toBe(expected);
   });
 });

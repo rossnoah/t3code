@@ -896,3 +896,18 @@ it("validates remote device hosts and rejects ambiguous host ids", () => {
   ).toThrow();
   expect(() => decodeDeviceHostSettings({ deviceHosts: [{ ...host, port: 0 }] })).toThrow();
 });
+
+describe("branch prefix settings", () => {
+  it("keeps the default for existing settings files", () => {
+    expect(decodeServerSettings({}).branchPrefix).toBe("t3code/");
+  });
+
+  it.each(["noah/", "team/noah", ""])(
+    "round-trips prefix %j and project overrides",
+    (branchPrefix) => {
+      const input = { branchPrefix, projectSettingsOverrides: { project: { branchPrefix } } };
+      expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+      expect(decodeServerSettingsPatch(input)).toEqual(input);
+    },
+  );
+});
