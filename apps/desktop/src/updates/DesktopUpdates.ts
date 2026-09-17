@@ -892,6 +892,29 @@ export const make = Effect.gen(function* () {
         isArm64HostRunningIntelBuild(environment.runtimeInfo),
       );
 
+      // Use the same reservation as manual and remote downloads. Availability
+      // can arrive before a check releases its reservation, so retry admission
+      // when an action finishes as well as when the update state changes.
+      const updateChanges = yield* PubSub.subscribe(stateChanges);
+      const actionCompletions = yield* PubSub.subscribe(finishedUpdateActions);
+      yield* Stream.merge(
+        Stream.fromSubscription(updateChanges),
+        Stream.fromSubscription(actionCompletions),
+      ).pipe(
+        Stream.runForEach(() =>
+          Ref.get(updateStateRef).pipe(
+            Effect.flatMap((state) =>
+              // A failed download stays available for a manual retry. Wait for
+              // the next successful feed check before retrying automatically.
+              state.errorContext === "download"
+                ? Effect.void
+                : downloadAvailableUpdate.pipe(Effect.asVoid),
+            ),
+          ),
+        ),
+        Effect.forkScoped,
+      );
+
       if (isArm64HostRunningIntelBuild(environment.runtimeInfo)) {
         yield* logUpdaterInfo(
           "Apple Silicon host detected while running Intel build; updates will switch to arm64 packages",
