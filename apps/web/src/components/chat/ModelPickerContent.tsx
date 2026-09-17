@@ -45,7 +45,11 @@ import {
   isProviderInstancePickerVisible,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
-import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
+import {
+  providerModelKey,
+  reorderFavoriteModels,
+  sortProviderModelItems,
+} from "../../modelOrdering";
 
 type ModelPickerItem = {
   slug: string;
@@ -305,9 +309,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   // to ProviderInstanceId so pre-migration favorites keyed by driver slugs
   // (e.g. `"codex:gpt-5"`) still resolve — the default instance id equals
   // the driver slug.
-  const favoritesSet = useMemo(() => {
-    return new Set(favorites.map((fav) => providerModelKey(fav.provider, fav.model)));
-  }, [favorites]);
+  const favoriteModelOrder = useMemo(
+    () => favorites.map((fav) => providerModelKey(fav.provider, fav.model)),
+    [favorites],
+  );
+  const favoritesSet = useMemo(() => new Set(favoriteModelOrder), [favoriteModelOrder]);
 
   /**
    * Lookup table keyed by `instanceId`. Used for display name + driver
@@ -525,11 +531,13 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
     return sortProviderModelItems(result, {
       favoriteModelKeys: favoritesSet,
+      favoriteModelOrder,
       groupFavorites: selectedInstanceId !== "favorites",
       instanceOrder: selectedInstanceId === "favorites" ? instanceOrder : [],
     });
   }, [
     favoritesSet,
+    favoriteModelOrder,
     flatModels,
     instanceOrder,
     matchesLockedProvider,
@@ -564,6 +572,23 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       ...(legacySection.isExpanded ? legacySection.legacyModels : []),
     ];
   }, [filteredModels, legacySection]);
+
+  const canReorderFavorites = selectedInstanceId === "favorites" && !isSearching;
+  const moveFavorite = useCallback(
+    (model: ModelPickerItem, direction: -1 | 1) => {
+      const index = visibleModels.indexOf(model);
+      const target = visibleModels[index + direction];
+      if (!canReorderFavorites || index < 0 || !target) return;
+      updateSettings({
+        favorites: reorderFavoriteModels(
+          favorites,
+          providerModelKey(model.instanceId, model.slug),
+          providerModelKey(target.instanceId, target.slug),
+        ),
+      });
+    },
+    [canReorderFavorites, favorites, updateSettings, visibleModels],
+  );
 
   const selectedEntry =
     selectedInstanceId === "favorites" ? undefined : entryByInstanceId.get(selectedInstanceId);
@@ -731,8 +756,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     return mapping.size > 0 ? mapping : EMPTY_MODEL_JUMP_LABELS;
   }, [keybindings, modelJumpCommandByKey, modelJumpShortcutContext]);
   const modelListExtraData = useMemo(
-    () => ({ favoritesSet, modelJumpLabelByKey, activeModelKey, selectedModelKeySet }),
-    [favoritesSet, modelJumpLabelByKey, activeModelKey, selectedModelKeySet],
+    () => ({ favoritesSet, modelJumpLabelByKey, activeModelKey, selectedModelKeySet, canReorderFavorites, moveFavorite }),
+    [favoritesSet, modelJumpLabelByKey, activeModelKey, selectedModelKeySet, canReorderFavorites, moveFavorite],
   );
 
   useEffect(() => {
@@ -1020,6 +1045,13 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                         jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
                         disabledReason={disabledReason}
                         onToggleFavorite={() => toggleFavorite(model.instanceId, model.slug)}
+                        {...(canReorderFavorites && visibleModels.length > 1
+                          ? {
+                              onMoveFavorite: (direction: -1 | 1) => moveFavorite(model, direction),
+                              canMoveUp: index > 0,
+                              canMoveDown: index < visibleModels.length - 1,
+                            }
+                          : {})}
                       />
                     );
                   }}

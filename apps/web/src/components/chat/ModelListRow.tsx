@@ -1,6 +1,6 @@
 import { type ProviderDriverKind, type ProviderInstanceId } from "@t3tools/contracts";
 import { memo } from "react";
-import { CheckIcon, StarIcon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, CheckIcon, StarIcon } from "lucide-react";
 import {
   getDisplayModelName,
   getTriggerDisplayModelLabel,
@@ -40,6 +40,9 @@ export const ModelListRow = memo(function ModelListRow(props: {
   jumpLabel?: string | null;
   disabledReason?: string | null;
   onToggleFavorite: () => void;
+  onMoveFavorite?: (direction: -1 | 1) => void;
+  canMoveUp?: boolean;
+  canMoveDown?: boolean;
 }) {
   const ProviderIcon = PROVIDER_ICON_BY_PROVIDER[props.driverKind] ?? null;
   const providerLabel = props.model.subProvider
@@ -97,6 +100,37 @@ export const ModelListRow = memo(function ModelListRow(props: {
       <div className="flex shrink-0 items-center gap-1.5">
         {props.showSelection && props.isSelected ? (
           <CheckIcon className="size-3.5" aria-hidden="true" />
+        ) : null}
+        {props.onMoveFavorite ? (
+          <div className="flex shrink-0 items-center gap-0.5">
+            {([-1, 1] as const).map((direction) => {
+              const label = direction === -1 ? "Move up" : "Move down";
+              const Icon = direction === -1 ? ArrowUpIcon : ArrowDownIcon;
+              return (
+                <Tooltip key={direction}>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size="icon-micro"
+                        variant="ghost-muted"
+                        disabled={direction === -1 ? !props.canMoveUp : !props.canMoveDown}
+                        aria-label={`${label}: ${props.model.name}`}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          props.onMoveFavorite?.(direction);
+                        }}
+                        onKeyDown={(event) => event.stopPropagation()}
+                      >
+                        <Icon className="size-3" />
+                      </Button>
+                    }
+                  />
+                  <TooltipPopup side="top">{label}</TooltipPopup>
+                </Tooltip>
+              );
+            })}
+          </div>
         ) : null}
         {props.jumpLabel ? (
           <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-[10px]">{props.jumpLabel}</Kbd>
