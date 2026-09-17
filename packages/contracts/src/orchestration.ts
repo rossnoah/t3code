@@ -399,7 +399,8 @@ export const ProjectScriptIcon = Schema.Literals([
 ]);
 export type ProjectScriptIcon = typeof ProjectScriptIcon.Type;
 
-export const ProjectScript = Schema.Struct({
+const ProjectShellScript = Schema.Struct({
+  kind: Schema.optional(Schema.Literal("command")),
   id: TrimmedNonEmptyString,
   name: TrimmedNonEmptyString,
   command: TrimmedNonEmptyString,
@@ -423,6 +424,18 @@ export const ProjectScript = Schema.Struct({
    */
   autoOpenPreview: Schema.optional(Schema.Boolean),
 });
+/** Prompt actions are user messages, and can never run as shell or setup commands. */
+export const ProjectScript = Schema.Union([
+  ProjectShellScript,
+  Schema.Struct({
+    id: TrimmedNonEmptyString,
+    name: TrimmedNonEmptyString,
+    icon: ProjectScriptIcon,
+    kind: Schema.Literal("prompt"),
+    prompt: TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
+    runOnWorktreeCreate: Schema.Literal(false),
+  }),
+]);
 export type ProjectScript = typeof ProjectScript.Type;
 
 export const ProjectFaviconPath = TrimmedNonEmptyString.check(
