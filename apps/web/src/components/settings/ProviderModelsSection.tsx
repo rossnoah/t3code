@@ -70,8 +70,7 @@ function describeModelCapabilities(model: ServerProviderModel): string[] {
  * Display order for the models list: favorites first (in user order), then
  * visible models, then hidden ones. Hidden models sink so the list reads
  * top-down as "what the picker shows"; moves only swap rows within the same
- * group, and the resulting display order is what gets persisted as
- * `modelOrder`.
+ * group. Favorites use their shared saved order; other models use `modelOrder`.
  */
 export function groupModelsForDisplay<
   T extends { readonly slug: string; readonly isCustom: boolean },
@@ -79,6 +78,7 @@ export function groupModelsForDisplay<
   models: ReadonlyArray<T>,
   options: {
     readonly favoriteModels: ReadonlySet<string>;
+    readonly favoriteModelOrder?: ReadonlyArray<string>;
     readonly hiddenModels: ReadonlySet<string>;
     readonly modelOrder: ReadonlyArray<string>;
   },
@@ -86,6 +86,7 @@ export function groupModelsForDisplay<
   const ordered = sortModelsForProviderInstance(models, {
     favoriteModels: options.favoriteModels,
     groupFavorites: true,
+    ...(options.favoriteModelOrder ? { favoriteModelOrder: options.favoriteModelOrder } : {}),
     modelOrder: options.modelOrder,
   });
   const isHidden = (model: T) => !model.isCustom && options.hiddenModels.has(model.slug);
@@ -186,10 +187,11 @@ export function ProviderModelsSection({
     () =>
       groupModelsForDisplay(models, {
         favoriteModels: favoriteModelSet,
+        favoriteModelOrder: favoriteModels,
         hiddenModels: hiddenModelSet,
         modelOrder,
       }),
-    [favoriteModelSet, hiddenModelSet, modelOrder, models],
+    [favoriteModelSet, favoriteModels, hiddenModelSet, modelOrder, models],
   );
   const favoriteCount = displayModels.filter((model) => favoriteModelSet.has(model.slug)).length;
   const hiddenCount = displayModels.filter(
@@ -287,7 +289,7 @@ export function ProviderModelsSection({
   };
 
   // Rows only trade places with a neighbour in the same group (favorites,
-  // visible, hidden), and the display order is persisted as the new order.
+  // visible, hidden). Favorite moves also apply to the chat picker.
   const groupOf = (model: (typeof displayModels)[number]) =>
     favoriteModelSet.has(model.slug)
       ? "favorite"
@@ -299,9 +301,20 @@ export function ProviderModelsSection({
     const nextIndex = index + direction;
     if (index < 0 || nextIndex < 0 || nextIndex >= displayModels.length) return;
     if (groupOf(displayModels[index]!) !== groupOf(displayModels[nextIndex]!)) return;
-    const next = displayModels.map((model) => model.slug);
-    [next[index], next[nextIndex]] = [next[nextIndex]!, next[index]!];
-    onModelOrderChange(next);
+    if (favoriteModelSet.has(slug)) {
+      const nextFavorites = [...favoriteModels];
+      const favoriteIndex = nextFavorites.indexOf(slug);
+      const targetIndex = nextFavorites.indexOf(displayModels[nextIndex]!.slug);
+      [nextFavorites[favoriteIndex], nextFavorites[targetIndex]] = [
+        nextFavorites[targetIndex]!,
+        nextFavorites[favoriteIndex]!,
+      ];
+      onFavoriteModelsChange(nextFavorites);
+    } else {
+      const next = displayModels.map((model) => model.slug);
+      [next[index], next[nextIndex]] = [next[nextIndex]!, next[index]!];
+      onModelOrderChange(next);
+    }
   };
 
   type DisplayModel = (typeof displayModels)[number];
