@@ -1,6 +1,6 @@
 import { type ProviderDriverKind, type ProviderInstanceId } from "@t3tools/contracts";
 import { memo } from "react";
-import { ArrowDownIcon, ArrowUpIcon, StarIcon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, CheckIcon, StarIcon } from "lucide-react";
 import {
   getDisplayModelName,
   getTriggerDisplayModelLabel,
@@ -31,6 +31,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
   providerAccentColor?: string | undefined;
   isFavorite: boolean;
   isSelected: boolean;
+  showSelection?: boolean;
   showProvider: boolean;
   preferShortName?: boolean;
   useTriggerLabel?: boolean;
@@ -97,6 +98,9 @@ export const ModelListRow = memo(function ModelListRow(props: {
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5">
+        {props.showSelection && props.isSelected ? (
+          <CheckIcon className="size-3.5" aria-hidden="true" />
+        ) : null}
         {props.onMoveFavorite ? (
           <div className="flex shrink-0 items-center gap-0.5">
             {([-1, 1] as const).map((direction) => {
