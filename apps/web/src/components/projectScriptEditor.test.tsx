@@ -36,6 +36,7 @@ vi.mock("./ui/textarea", () => ({ Textarea: "textarea" }));
 
 import {
   EMPTY_PROJECT_SCRIPT_INPUT,
+  editorRequestForScript,
   ProjectScriptEditorDialog,
   type ProjectScriptActionResult,
   type ProjectScriptEditorRequest,
@@ -241,5 +242,72 @@ describe("project action editor save lifecycle", () => {
       await completion;
     });
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe("prompt actions", () => {
+  it("saves a prompt after switching from a shell action and removes shell options", async () => {
+    onSubmit.mockResolvedValue(AsyncResult.success(undefined));
+    open({
+      ...request("Update ticket"),
+      initial: {
+        ...EMPTY_PROJECT_SCRIPT_INPUT,
+        name: "Update ticket",
+        command: "Update Linear with this thread's progress.",
+        runOnWorktreeCreate: true,
+        waitForSetup: true,
+        previewUrl: "http://localhost:3000",
+        autoOpenPreview: true,
+      },
+    });
+    act(() =>
+      renderer!.root
+        .findAllByType("button")
+        .find((button) => button.children.includes("Prompt"))!
+        .props.onClick(),
+    );
+    await act(async () => {
+      await submit();
+    });
+    expect(onSubmit).toHaveBeenCalledWith("Update ticket", {
+      name: "Update ticket",
+      kind: "prompt",
+      command: "Update Linear with this thread's progress.",
+      icon: "play",
+      keybinding: null,
+      runOnWorktreeCreate: false,
+      waitForSetup: false,
+      previewUrl: null,
+      autoOpenPreview: false,
+    });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("opens an existing prompt for editing and rejects an empty prompt", async () => {
+    const initial = editorRequestForScript(
+      {
+        id: "update-ticket",
+        name: "Update ticket",
+        kind: "prompt",
+        prompt: "Update Linear.",
+        icon: "play",
+        runOnWorktreeCreate: false,
+      },
+      [],
+    );
+    open(initial);
+    expect(renderer!.root.findByProps({ id: "script-command" }).props.value).toBe("Update Linear.");
+    act(() =>
+      renderer!.root
+        .findByProps({ id: "script-command" })
+        .props.onChange({ target: { value: "  " } }),
+    );
+    await act(async () => {
+      await submit();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(renderer!.root.findAllByType("p").flatMap((p) => p.children)).toContain(
+      "Prompt is required.",
+    );
   });
 });
