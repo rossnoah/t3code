@@ -21,6 +21,22 @@ interrupted, and threads without saved provider resume state need a new message.
 If you previously enabled continuation for updates, enable this setting once
 to allow recovery without a connected client.
 
+## Queue a desktop restart
+
+Desktop updates download automatically in the background. When an update is
+ready, choose **See changes**, **Restart when idle**, or **Restart** in the update
+notice. Dismissing the notice keeps the download ready; reopen it from the update
+button in the sidebar or Settings.
+
+**Restart when idle** waits for agents in all environments hosted by that desktop
+app, including WSL, to finish. Agents waiting for approval or input and background
+agent work keep the restart queued. Disconnected environments must reconnect
+before the app can confirm they are idle. Keep the app open while waiting.
+
+Use **Cancel restart** to cancel the queued restart, or **Restart** to install
+immediately. Terminal commands may still be interrupted. Closing or reloading
+the app cancels the queue.
+
 ## Update a connected server
 
 The offered action depends on how the server runs:
