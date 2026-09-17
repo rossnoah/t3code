@@ -62,7 +62,7 @@ jobs:
       UPSTREAM_SHA: ${{ needs.plan.outputs.upstream_sha }}
       UPSTREAM_TAG: ${{ needs.plan.outputs.upstream_tag }}
       UPSTREAM_URL: ${{ needs.plan.outputs.upstream_url }}
-      FORK_SHA: ${{ github.sha }}
+      SOURCE_SHA: ${{ github.sha }}
       # Level 1 preserves ZIP compatibility and avoids spending most archive time on compression.
       ELECTRON_BUILDER_COMPRESSION_LEVEL: "1"
       BUILD_TARGET: ${{ github.event_name == 'push' && 'zip' || 'dmg' }}
@@ -84,10 +84,9 @@ jobs:
             fi
           done
 
-      # Merge all fork commits with the actual published nightly, including future
-      # customizations. The merge is isolated to this runner; conflicts never
-      # overwrite main, and the combined source is attached to the release.
-      - name: Combine fork changes with upstream nightly
+      # Replay the curated commits in isolation. Main and fork/stack move only
+      # after this exact source passes checks, packaging, and signing verification.
+      - name: Prepare patch stack on upstream nightly
         shell: bash
         run: |
           set -euo pipefail
@@ -96,12 +95,17 @@ jobs:
           git remote add upstream "https://github.com/pingdotgg/t3code.git"
           git fetch --no-tags origin main
           git sparse-checkout set --no-cone '/*' '!/.repos/'
-          git checkout --detach "$FORK_SHA"
+          git checkout --detach "$SOURCE_SHA"
           git fetch --no-tags upstream "refs/tags/$UPSTREAM_TAG"
           test "$(git rev-parse FETCH_HEAD^{commit})" = "$UPSTREAM_SHA"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git merge --no-edit "$UPSTREAM_SHA"
+          expected_stack=$(git ls-remote origin refs/heads/fork/stack | cut -f1)
+          echo "EXPECTED_STACK_SHA=${expected_stack:--}" >> "$GITHUB_ENV"
+          node .github/scripts/fork-stack.cjs prepare "$UPSTREAM_SHA" "$UPSTREAM_TAG" "$RUNNER_TEMP/fork-candidate"
+          candidate=$(git -C "$RUNNER_TEMP/fork-candidate" rev-parse HEAD)
+          git checkout --detach "$candidate"
+          echo "FORK_SHA=$candidate" >> "$GITHUB_ENV"
           git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/fork-source.tar.gz"
 
       - name: Configure build caches
@@ -192,6 +196,14 @@ jobs:
           grep -q 'owner: rossnoah' "${apps[0]}/Contents/Resources/app-update.yml"
           grep -q 'repo: t3code' "${apps[0]}/Contents/Resources/app-update.yml"
 
+      - name: Promote checked source and patch stack
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          node .github/scripts/fork-stack.cjs publish "$SOURCE_SHA" "$EXPECTED_STACK_SHA"
+
       - name: Publish fork nightly
         env:
           GH_TOKEN: ${{ github.token }}
@@ -204,12 +216,13 @@ jobs:
             "Personal Apple Silicon build of T3 Code. Local, direct, and Tailscale connections; T3 Connect is not configured.",
             "",
             `Upstream nightly: ${process.env.UPSTREAM_URL}`,
-            `Fork changes: https://github.com/rossnoah/t3code/commit/${process.env.FORK_SHA}`,
+            `Build source: https://github.com/rossnoah/t3code/commit/${process.env.FORK_SHA}`,
+            `Patch stack: https://github.com/rossnoah/t3code/commit/${JSON.parse(fs.readFileSync('.fork/stack.json', 'utf8')).tip}`,
             "",
             process.env.BUILD_TARGET === "dmg"
               ? "Download the arm64 DMG for the initial install. In-app nightly updates use this fork."
               : "This release provides the ZIP used by in-app updates. For a fresh install, unzip it and move the app to Applications. DMG installers are produced by scheduled or manual builds.",
-            "The fork-source.tar.gz attachment contains the combined build source. GitHub's automatic source archives contain only the fork commit.",
+            "The source archives contain the exact upstream base and fork customizations used for this build, before release version stamping.",
             "",
             sourceMarker(process.env.FORK_SHA, process.env.UPSTREAM_SHA),
           ].join('\n');

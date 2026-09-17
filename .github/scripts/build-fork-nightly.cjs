@@ -36,6 +36,7 @@ async function checkFork() {
   await runCheck("node", [
     "--test",
     ".github/scripts/fork-nightly.test.cjs",
+    ".github/scripts/fork-stack.test.cjs",
     ".github/scripts/build-fork-nightly.test.cjs",
   ]);
   await runCheck("vp", [
@@ -50,6 +51,15 @@ async function checkFork() {
     "apps/web/src/modelOrdering.test.ts",
     "apps/web/src/components/settings/ProviderModelsSection.test.ts",
     "apps/web/vite/reactCompiler.test.ts",
+    "apps/web/src/queuedMessageStore.test.ts",
+    "apps/web/src/components/chat/ComposerPrimaryActions.test.tsx",
+    "apps/web/src/components/ThreadNotificationCoordinator.test.tsx",
+    "apps/web/src/state/desktopUpdateInstall.test.ts",
+    "apps/web/src/state/desktopUpdateInstallController.test.ts",
+    "apps/web/src/projectScripts.test.ts",
+    "apps/web/src/components/projectScriptEditor.test.tsx",
+    "packages/contracts/src/projectScript.test.ts",
+    "apps/server/src/project/ProjectSetupScriptRunner.test.ts",
     "scripts/build-desktop-artifact.test.ts",
   ]);
   await runCheck("vp", [
