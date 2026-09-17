@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import * as Option from "effect/Option";
 import {
   CircleAlertIcon,
@@ -10,6 +11,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef } from "react";
 
+import { isQueuedCompletionSuppressed } from "../queuedMessageStore";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import { useEnvironments } from "../state/environments";
 import { environmentShell } from "../state/shell";
@@ -137,6 +139,10 @@ function EnvironmentNotifications({
             ? "completion"
             : null;
       if (!kind) continue;
+      const threadKey = scopedThreadKey({ environmentId, threadId: thread.id });
+      // The completion is still recorded above, so removing or pausing the
+      // queue cannot replay an alert for this intermediate turn.
+      if (kind === "completion" && isQueuedCompletionSuppressed(threadKey, completedAt)) continue;
       const title =
         kind === "completion"
           ? "Thread completed"
@@ -146,8 +152,11 @@ function EnvironmentNotifications({
               ? "Thread failed"
               : "Input needed";
       if (hasNotificationSound(mode)) {
-        void playNotificationSound(kind, () =>
-          hasNotificationSound(getClientSettings().notificationMode),
+        void playNotificationSound(
+          kind,
+          () =>
+            hasNotificationSound(getClientSettings().notificationMode) &&
+            (kind !== "completion" || !isQueuedCompletionSuppressed(threadKey, completedAt)),
         );
       }
       if (
