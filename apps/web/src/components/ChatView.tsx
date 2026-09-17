@@ -325,12 +325,12 @@ import {
   terminalContextReference,
 } from "../lib/composerContextRecords";
 import {
-  latestCompletedToolActivityId,
-  type QueuedComposerMessage,
+  shouldQueueFollowUp,
   type QueuedMessageSendSettings,
   useQueuedMessages,
   useQueuedMessageStore,
 } from "../queuedMessageStore";
+import { QueuedMessagesPanel } from "./chat/QueuedMessagesPanel";
 import { sendQueuedMessage } from "./chat/sendQueuedMessage";
 import { type ReviewCommentContext } from "../reviewCommentContext";
 import { environmentCatalog } from "../connection/catalog";
@@ -535,7 +535,6 @@ import {
 } from "./chat/composerPromptHistory";
 
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
-const EMPTY_QUEUED_MESSAGES: QueuedComposerMessage[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -3953,18 +3952,13 @@ export default function ChatView(props: ChatViewProps) {
 
   const interruptContextRef = useRef({ activeThread, phase, setThreadError });
   interruptContextRef.current = { activeThread, phase, setThreadError };
-  const restoreQueuedMessagesRef = useRef<(messages: ReadonlyArray<QueuedComposerMessage>) => void>(
-    () => {},
-  );
   const onInterrupt = useCallback(async () => {
     const { activeThread, phase, setThreadError } = interruptContextRef.current;
     const input = buildRunningThreadTurnInterruptInput(activeThread, phase);
     if (!input || !activeThread) return;
-    restoreQueuedMessagesRef.current(
-      useQueuedMessageStore
-        .getState()
-        .drain(scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id))),
-    );
+    useQueuedMessageStore
+      .getState()
+      .pause(scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id)));
     const result = await interruptThreadTurn({
       environmentId: activeThread.environmentId,
       input,
@@ -7243,82 +7237,9 @@ export default function ChatView(props: ChatViewProps) {
       sendCtx.selectedPromptEffort,
     ),
   });
-  // Puts queued messages back into the composer after Stop or Cancel. Prompts
-  // join with blank lines; attachments and contexts are added.
-  const restoreQueuedMessagesToComposer = (messages: ReadonlyArray<QueuedComposerMessage>) => {
-    const [firstMessage] = messages;
-    if (!firstMessage) return;
-    const prompts = [promptRef.current, ...messages.map((message) => message.prompt)]
-      .map((prompt) => prompt.trim())
-      .filter((prompt) => prompt.length > 0);
-    const nextPrompt = prompts.join("\n\n");
-    promptRef.current = nextPrompt;
-    setComposerDraftPrompt(composerDraftTarget, nextPrompt);
-    // The draft store silently drops attachments over the per-turn cap. Split
-    // the overflow back into the queue so nothing is lost; the user can send
-    // the first batch and the rest follows as a queued message.
-    const attachmentRoom = Math.max(
-      0,
-      PROVIDER_SEND_TURN_MAX_ATTACHMENTS -
-        composerImagesRef.current.length -
-        composerFilesRef.current.length,
-    );
-    const attachments = messages.flatMap((message) => [...message.images, ...message.files]);
-    const restored = attachments.slice(0, attachmentRoom);
-    const overflow = attachments.slice(attachmentRoom);
-    const restoredImages = restored.filter((attachment) => attachment.type === "image");
-    const restoredFiles = restored.filter((attachment) => attachment.type === "file");
-    // The composer syncs these refs from the draft in an effect; a send before
-    // that effect runs must already see the restored content.
-    composerImagesRef.current = [...composerImagesRef.current, ...restoredImages];
-    composerFilesRef.current = [...composerFilesRef.current, ...restoredFiles];
-    if (restoredImages.length > 0) addComposerDraftImages(composerDraftTarget, restoredImages);
-    if (restoredFiles.length > 0) addComposerDraftFiles(composerDraftTarget, restoredFiles);
-    if (overflow.length > 0 && activeThreadKey) {
-      // The overflow is the rest of the restored draft, so it follows the composer.
-      const sendCtx = composerRef.current?.getSendContext();
-      useQueuedMessageStore.getState().enqueue(activeThreadKey, {
-        prompt: "",
-        images: overflow.filter((attachment) => attachment.type === "image"),
-        files: overflow.filter((attachment) => attachment.type === "file"),
-        terminalContexts: [],
-        previewAnnotations: [],
-        reviewComments: [],
-        sendSettings: sendCtx ? readComposerSendSettings(sendCtx) : firstMessage.sendSettings,
-        queuedAfterToolActivityId: latestCompletedToolActivityId(threadActivities),
-        // Restoration is not a send. The user decides when the overflow goes.
-        holdUntilUserAction: true,
-        createdAt: new Date().toISOString(),
-      });
-      toastManager.add(
-        stackedThreadToast({
-          type: "info",
-          title: "Some attachments stayed queued",
-          description: `A message holds at most ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} attachments. Use Send now on the queued row when you want the rest to go.`,
-        }),
-      );
-    }
-    const restoredTerminalContexts = [
-      ...composerTerminalContextsRef.current,
-      ...messages.flatMap((message) => message.terminalContexts),
-    ];
-    composerTerminalContextsRef.current = restoredTerminalContexts;
-    setComposerDraftTerminalContexts(composerDraftTarget, restoredTerminalContexts);
-    const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
-    setComposerDraftPreviewAnnotations(composerDraftTarget, [
-      ...(draft?.previewAnnotations ?? []),
-      ...messages.flatMap((message) => message.previewAnnotations),
-    ]);
-    setComposerDraftReviewComments(composerDraftTarget, [
-      ...(draft?.reviewComments ?? []),
-      ...messages.flatMap((message) => message.reviewComments),
-    ]);
-    composerRef.current?.resetCursorState({
-      cursor: collapseExpandedComposerCursor(nextPrompt, nextPrompt.length),
-      prompt: nextPrompt,
-      detectTrigger: true,
-    });
-  };
+  const queuePaused = useQueuedMessageStore(
+    (state) => state.pausedByThreadKey[activeThreadKey ?? ""] ?? false,
+  );
 
   const onSend = async (
     e?: { preventDefault: () => void },
@@ -7689,19 +7610,18 @@ export default function ChatView(props: ChatViewProps) {
       );
       return;
     }
-    // A queued message that will still leave on its own goes first, so a new
-    // send lines up behind it instead of overtaking it.
-    const queueStillSending =
-      activeThreadKey !== null &&
-      (useQueuedMessageStore.getState().queuesByThreadKey[activeThreadKey] ?? []).some(
-        (message) => message.sending !== undefined || !message.holdUntilUserAction,
-      );
+    // New messages line up behind queued ones instead of overtaking them, and
+    // a paused queue retains them regardless of the steering preference.
     if (
       !directAnnotation &&
       activeThreadKey &&
-      (queueStillSending ||
-        (phase === "running" &&
-          (settings.followUpBehavior === "queue") !== (submissionIntent === "alternate")))
+      shouldQueueFollowUp({
+        isRunning: phase === "running",
+        hasQueuedMessages: queuedMessages.length > 0,
+        paused: queuePaused,
+        followUpBehavior: settings.followUpBehavior,
+        submissionIntent,
+      })
     ) {
       const sendSettings = readComposerSendSettings(sendCtx);
       if (
@@ -7719,7 +7639,6 @@ export default function ChatView(props: ChatViewProps) {
         previewAnnotations: [...composerPreviewAnnotations],
         reviewComments: [...composerReviewComments],
         sendSettings,
-        queuedAfterToolActivityId: latestCompletedToolActivityId(threadActivities),
         createdAt: new Date().toISOString(),
       });
       if (actionPrompt === undefined) {
@@ -8626,37 +8545,30 @@ export default function ChatView(props: ChatViewProps) {
 
   // Queued messages go out from QueuedMessageSender, which also covers
   // threads that are not on screen. Send now uses the same path but skips the
-  // wait for a boundary. Approvals and questions still hold it: a steer on
-  // top of them would answer nothing and confuse the turn.
+  // wait for the turn to end. Approvals and questions still hold it: a steer
+  // on top of them would answer nothing and confuse the turn.
   const queueBlockedByPendingRequest =
     activePendingApproval !== null || pendingUserInputs.length > 0;
+  const queueSendDisabled =
+    queueBlockedByPendingRequest || queuedMessages.some((message) => message.sending);
 
-  // The row handlers are read from refs at call-time so their identity stays
-  // stable and does not bust TimelineRowCtx on every ChatView render.
-  const queuedMessageActionsRef = useRef({
-    steer: (_id: string) => {},
-    remove: (_id: string) => {},
-  });
+  // Read from a ref at call-time so the keybinding handler stays stable.
+  const queuedMessageActionsRef = useRef({ steer: (_id: string) => {} });
   queuedMessageActionsRef.current = {
     steer: (id) => {
       if (!activeThreadRef || queueBlockedByPendingRequest) return;
       void sendQueuedMessage(activeThreadRef, id);
     },
-    remove: (id) => {
-      if (!activeThreadKey) return;
-      const message = useQueuedMessageStore.getState().remove(activeThreadKey, id);
-      if (message) restoreQueuedMessagesToComposer([message]);
-    },
   };
   const onSteerQueuedMessage = useCallback((id: string) => {
     queuedMessageActionsRef.current.steer(id);
   }, []);
-  const onRemoveQueuedMessage = useCallback((id: string) => {
-    queuedMessageActionsRef.current.remove(id);
-  }, []);
-  // Stop also cancels the queue: the messages return to the composer instead
-  // of starting a new turn the moment the interrupted one settles.
-  restoreQueuedMessagesRef.current = restoreQueuedMessagesToComposer;
+  const onQueueInteractionChange = useCallback(
+    (active: boolean) => {
+      if (activeThreadKey) useQueuedMessageStore.getState().setInteracting(activeThreadKey, active);
+    },
+    [activeThreadKey],
+  );
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
@@ -9939,14 +9851,6 @@ export default function ChatView(props: ChatViewProps) {
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 topFadeEnabled={!hasTimelineTopBanner}
                 loadEarlier={paintOnlyDisplayedTimeline ? null : loadEarlierTurns}
-                queuedMessages={paintOnlyDisplayedTimeline ? EMPTY_QUEUED_MESSAGES : queuedMessages}
-                onSteerQueuedMessage={onSteerQueuedMessage}
-                steerQueuedMessageShortcutLabel={shortcutLabelForCommand(
-                  keybindings,
-                  "thread.steerQueuedMessage",
-                  { context: { terminalFocus: false } },
-                )}
-                onRemoveQueuedMessage={onRemoveQueuedMessage}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
@@ -10021,6 +9925,17 @@ export default function ChatView(props: ChatViewProps) {
                     }
                   >
                     <ComposerSurface.Shell contextStrip={showComposerContextStrip}>
+                      {activeThreadKey && queuedMessages.length > 0 ? (
+                        <QueuedMessagesPanel
+                          key={activeThreadKey}
+                          threadKey={activeThreadKey}
+                          messages={queuedMessages}
+                          paused={queuePaused}
+                          sendDisabled={queueSendDisabled}
+                          onSendNow={onSteerQueuedMessage}
+                          onInteractionChange={onQueueInteractionChange}
+                        />
+                      ) : null}
                       <ComposerSurface.Host>
                         <div ref={attachDraftHeroComposerAnchorRef} className="relative z-10">
                           <ChatComposer

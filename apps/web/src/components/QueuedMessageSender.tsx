@@ -6,7 +6,6 @@ import { useShallow } from "zustand/react/shallow";
 import { useComposerDraftStore } from "../composerDraftStore";
 import {
   isQueuedMessageDue,
-  latestCompletedToolActivityId,
   useQueuedMessageStore,
   useQueuedMessages,
 } from "../queuedMessageStore";
@@ -29,8 +28,8 @@ export function QueuedMessageSender() {
 
 /**
  * Watches one thread while it has queued messages. Reading the thread keeps
- * its detail subscribed, so tool boundaries and the end of the turn are
- * visible while the user is elsewhere.
+ * its detail subscribed, so the end of the turn is visible while the user is
+ * elsewhere.
  */
 function ThreadQueueSender({ threadKey }: { threadKey: string }) {
   const threadRef = useMemo(() => parseScopedThreadKey(threadKey), [threadKey]);
@@ -45,10 +44,8 @@ function ThreadQueueSender({ threadKey }: { threadKey: string }) {
   const next = queue[0];
   const sending = queue.some((message) => message.sending);
   const activities = thread?.activities;
-  const latestToolActivityId = useMemo(
-    () => latestCompletedToolActivityId(activities ?? []),
-    [activities],
-  );
+  const paused = useQueuedMessageStore((state) => state.pausedByThreadKey[threadKey] ?? false);
+  const interacting = useQueuedMessageStore((state) => state.interactingThreadKey === threadKey);
   const pendingRequests = useMemo(() => derivePendingRequests(activities ?? []), [activities]);
   const phase = derivePhase(thread?.session ?? null);
 
@@ -83,14 +80,12 @@ function ThreadQueueSender({ threadKey }: { threadKey: string }) {
     (environment !== null && environment.connection.phase !== "connected") ||
     !serverConfigLoaded ||
     rewinding ||
+    interacting ||
     sending ||
     waitingForServer ||
     pendingRequests.approvals.length > 0 ||
     pendingRequests.userInputs.length > 0;
-  const due =
-    next !== undefined &&
-    !blocked &&
-    isQueuedMessageDue({ message: next, phase, latestToolActivityId });
+  const due = next !== undefined && !blocked && isQueuedMessageDue({ paused, phase });
   const nextId = next?.id;
   useEffect(() => {
     if (!due || !threadRef || nextId === undefined) return;
