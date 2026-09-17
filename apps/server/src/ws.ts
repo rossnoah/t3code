@@ -81,6 +81,8 @@ import {
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
+import { applyTemporaryWorktreeBranchPrefix, isTemporaryWorktreeBranch } from "@t3tools/shared/git";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
@@ -1462,11 +1464,27 @@ const makeWsRpcLayer = (
               }
               yield* worktreeSetupTracker.stageStatus(threadId, "checkout", "running");
               let checkoutTotal: number | null = null;
+              let worktreeBranch = prepareWorktree.branch;
+              if (worktreeBranch !== undefined && isTemporaryWorktreeBranch(worktreeBranch)) {
+                const projectId =
+                  targetProjectId ??
+                  Option.getOrUndefined(yield* projectionSnapshotQuery.getThreadShellById(threadId))
+                    ?.projectId ??
+                  null;
+                const { settings } = resolveProjectSettings(
+                  yield* serverSettings.getSettings,
+                  projectId,
+                );
+                worktreeBranch = applyTemporaryWorktreeBranchPrefix(
+                  worktreeBranch,
+                  settings.branchPrefix,
+                );
+              }
               const worktree = yield* gitWorkflow.createWorktree(
                 {
                   cwd: prepareWorktree.projectCwd,
                   refName: worktreeBaseRef,
-                  newRefName: prepareWorktree.branch,
+                  newRefName: worktreeBranch,
                   baseRefName: prepareWorktree.baseBranch,
                   path: null,
                 },

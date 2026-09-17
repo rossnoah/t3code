@@ -1061,29 +1061,32 @@ describe("CheckpointReactor", () => {
     },
   );
 
-  it("does not adopt a temporary placeholder checkout as the thread branch", async () => {
-    const harness = await createHarness({
-      seedFilesystemCheckpoints: false,
-      threadBranch: "t3code/original-branch",
-      localStatusRefName: "t3code/0a1b2c3d",
-    });
+  it.each(["t3code/0a1b2c3d", "noah/worktree-0a1b2c3d", "worktree-0a1b2c3d"])(
+    "does not adopt placeholder %s as the thread branch",
+    async (temporaryBranch) => {
+      const harness = await createHarness({
+        seedFilesystemCheckpoints: false,
+        threadBranch: "t3code/original-branch",
+        localStatusRefName: temporaryBranch,
+      });
 
-    harness.provider.emit({
-      type: "turn.completed",
-      eventId: EventId.make("evt-turn-completed-branch-drift-temp"),
-      provider: ProviderDriverKind.make("codex"),
-      createdAt: "2026-01-01T00:00:00.000Z",
-      threadId: ThreadId.make("thread-1"),
-      turnId: asTurnId("turn-branch-drift-temp"),
-      payload: { state: "completed" },
-    });
+      harness.provider.emit({
+        type: "turn.completed",
+        eventId: EventId.make("evt-turn-completed-branch-drift-temp"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-branch-drift-temp"),
+        payload: { state: "completed" },
+      });
 
-    await harness.drain();
+      await harness.drain();
 
-    const snapshot = await harness.readModel();
-    const thread = snapshot.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.branch).toBe("t3code/original-branch");
-  });
+      const snapshot = await harness.readModel();
+      const thread = snapshot.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      expect(thread?.branch).toBe("t3code/original-branch");
+    },
+  );
 
   it("ignores auxiliary thread turn completion while primary turn is active", async () => {
     const pullRequestRefreshCalls: string[] = [];
