@@ -6,6 +6,8 @@ import babel from "@rolldown/plugin-babel";
 import { reactCompilerPreset } from "@vitejs/plugin-react";
 
 type CompilerResult = { code: string; map: string | null };
+// Named explicitly so declaration emit never has to reference rolldown's package path.
+type BabelPlugin = Awaited<ReturnType<typeof babel>>;
 
 export function compilerCacheKey(inputs: ReadonlyArray<string>): string {
   return NodeCrypto.createHash("sha256").update(JSON.stringify(inputs)).digest("hex");
@@ -45,7 +47,9 @@ export function createCompilerCache(directory: string) {
   };
 }
 
-export async function reactCompilerPlugin(cacheDirectory?: string) {
+export async function reactCompilerPlugin(
+  cacheDirectory?: string,
+): Promise<BabelPlugin | BabelPlugin[]> {
   const plugin = await babel({
     // Workspace packages live outside the web cwd; parse their TS/JSX explicitly.
     parserOpts: { plugins: ["typescript", "jsx"] },
