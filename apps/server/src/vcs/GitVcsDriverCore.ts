@@ -3047,6 +3047,88 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     },
   );
 
+  const copyWorktreeIncludes = Effect.fn("GitVcsDriver.copyWorktreeIncludes")(
+    function* (cwd: string, worktreePath: string) {
+      const operation = "GitVcsDriver.copyWorktreeIncludes";
+      const fail = (detail: string) =>
+        new GitCommandError({ operation, command: "git", cwd, detail });
+      // The first porcelain record is the main checkout, even when creation
+      // was requested from a linked worktree or a project subdirectory.
+      const worktrees = yield* runGitStdout(operation, cwd, [
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z",
+      ]);
+      const firstField = worktrees.split("\0", 1)[0];
+      if (!firstField?.startsWith("worktree ")) return;
+      const sourceRoot = firstField.slice("worktree ".length);
+      const includePath = path.join(sourceRoot, ".worktreeinclude");
+      if (!(yield* fileSystem.exists(includePath))) return;
+
+      // Let Git interpret its own pattern syntax (including negation and
+      // escaped comments). Then intersect with the repository's ignored files.
+      const candidates = yield* executeGit(
+        operation,
+        sourceRoot,
+        ["ls-files", "--others", "--ignored", "--exclude-from=.worktreeinclude", "-z"],
+        { maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES },
+      );
+      if (candidates.stdoutTruncated)
+        return yield* fail(".worktreeinclude matched too many files.");
+      if (candidates.stdout.length === 0) return;
+      const ignored = yield* executeGit(operation, sourceRoot, ["check-ignore", "--stdin", "-z"], {
+        stdin: candidates.stdout,
+        allowNonZeroExit: true,
+        maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES,
+      });
+      if (ignored.exitCode !== 0 && ignored.exitCode !== 1) {
+        return yield* fail("Could not check which .worktreeinclude files Git ignores.");
+      }
+      if (ignored.stdoutTruncated) return yield* fail(".worktreeinclude matched too many files.");
+      const realSourceRoot = yield* fileSystem.realPath(sourceRoot);
+      const realWorktreeRoot = yield* fileSystem.realPath(worktreePath);
+      for (const relativePath of splitNullSeparatedGitStdoutPaths(ignored)) {
+        const source = path.resolve(sourceRoot, relativePath);
+        const destination = path.resolve(worktreePath, relativePath);
+        if (!isPathWithinRoot(sourceRoot, source) || !isPathWithinRoot(worktreePath, destination)) {
+          return yield* fail("A .worktreeinclude path resolves outside the repository.");
+        }
+        const realSource = yield* fileSystem.realPath(source);
+        if (!isPathWithinRoot(realSourceRoot, realSource)) continue;
+        const info = yield* fileSystem.stat(realSource);
+        if (info.type !== "File") continue;
+        // Never replace files checked out on the target branch. Verify each
+        // parent before creating children so tracked symlinks cannot redirect a copy.
+        let parent = realWorktreeRoot;
+        for (const segment of relativePath.split("/").slice(0, -1)) {
+          parent = path.join(parent, segment);
+          if (!(yield* fileSystem.exists(parent))) yield* fileSystem.makeDirectory(parent);
+          if (!isPathWithinRoot(realWorktreeRoot, yield* fileSystem.realPath(parent))) {
+            return yield* fail(
+              `Cannot copy .worktreeinclude file '${relativePath}' through a symlink outside the worktree.`,
+            );
+          }
+        }
+        yield* fileSystem.copy(realSource, destination, { overwrite: false });
+      }
+    },
+    (effect, cwd) =>
+      effect.pipe(
+        Effect.mapError((cause) =>
+          cause._tag === "GitCommandError"
+            ? cause
+            : new GitCommandError({
+                operation: "GitVcsDriver.copyWorktreeIncludes",
+                command: "fs.copy",
+                cwd,
+                detail: "Could not copy files from .worktreeinclude into the new worktree.",
+                cause,
+              }),
+        ),
+      ),
+  );
+
   const createWorktree: GitVcsDriver.GitVcsDriver["Service"]["createWorktree"] = Effect.fn(
     "createWorktree",
   )(function* (input, options) {
@@ -3087,6 +3169,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     if (progress?.onWorktreeClaimed) {
       yield* progress.onWorktreeClaimed(worktreePath);
     }
+
+    yield* copyWorktreeIncludes(input.cwd, worktreePath);
 
     // `git worktree add` leaves submodules empty, so a repo that keeps agent
     // skills, tooling or source in one gets a worktree that is quietly missing
