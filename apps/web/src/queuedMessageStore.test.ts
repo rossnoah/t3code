@@ -153,6 +153,58 @@ describe("queuedMessageStore", () => {
     expect(paused()).toBe(false);
   });
 
+  it("starts a fresh queue unpaused after Stop with no queued messages", () => {
+    const { enqueue, pause } = useQueuedMessageStore.getState();
+    pause("thread-a");
+    const message = enqueue("thread-a", makeMessage("follow-up after restarting"));
+
+    expect(queue()).toEqual([message]);
+    expect(isQueuedMessageDue({ phase: "running", paused: paused() })).toBe(false);
+    expect(isQueuedMessageDue({ phase: "ready", paused: paused() })).toBe(true);
+    expect(
+      shouldQueueFollowUp({
+        isRunning: true,
+        hasQueuedMessages: false,
+        paused: paused(),
+        followUpBehavior: "steer",
+      }),
+    ).toBe(false);
+  });
+
+  it.each(["remove", "send"] as const)(
+    "starts a fresh queue unpaused after %s empties a paused queue",
+    (action) => {
+      const { enqueue, pause, remove, beginSend, finishSend } = useQueuedMessageStore.getState();
+      const previous = enqueue("thread-a", makeMessage("previous"));
+      pause("thread-a");
+      if (action === "remove") remove("thread-a", previous.id);
+      else {
+        beginSend("thread-a", previous.id, null);
+        finishSend("thread-a", previous.id);
+      }
+      expect(paused()).toBe(false);
+      const next = enqueue("thread-a", makeMessage("next"));
+
+      expect(queue()).toEqual([next]);
+      expect(isQueuedMessageDue({ phase: "ready", paused: paused() })).toBe(true);
+    },
+  );
+
+  it("clearing a failed queue does not pause a fresh queue or another thread", () => {
+    const { enqueue, beginSend, failSend, pause, remove } = useQueuedMessageStore.getState();
+    const failed = enqueue("thread-a", makeMessage("failed send"));
+    const other = enqueue("thread-b", makeMessage("other thread"));
+    pause("thread-b");
+    beginSend("thread-a", failed.id, null);
+    failSend("thread-a", failed.id);
+    remove("thread-a", failed.id);
+    enqueue("thread-a", makeMessage("fresh follow-up"));
+
+    expect(paused()).toBe(false);
+    expect(paused("thread-b")).toBe(true);
+    expect(queue("thread-b")).toEqual([other]);
+  });
+
   it("sending a selected message immediately leaves a paused queue paused", () => {
     const { enqueue, pause, beginSend, finishSend } = useQueuedMessageStore.getState();
     const first = enqueue("thread-a", makeMessage("first"));
