@@ -42,8 +42,9 @@ You can also pause the queue without stopping the current turn.
 
 Drag messages to change their order, edit them, or delete them. The up arrow sends
 one message immediately, steering the current turn when the provider supports it.
-Sending one message immediately does not resume a paused queue. New messages join
-any remaining queued messages in order.
+Sending one message immediately does not resume the remaining paused messages.
+New messages join any remaining queued messages in order. Once the queue is empty,
+the next queued message starts unpaused, even if you previously pressed Stop.
 
 Queues stay in the current client session and send while that thread is open.
 They are not shared between devices or preserved when the client reloads.
