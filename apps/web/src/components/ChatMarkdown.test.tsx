@@ -1,4 +1,6 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { AsyncResult } from "effect/unstable/reactivity";
+import * as localApi from "../localApi";
 import { act, type ComponentProps, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestRenderer } from "react-test-renderer";
@@ -34,11 +36,17 @@ vi.mock("./ui/tooltip", async () => {
     TooltipPopup: () => null,
   };
 });
-vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
+const fileOpenMocks = vi.hoisted(() => ({
+  query: vi.fn(),
+  editor: vi.fn(),
+}));
+vi.mock("../state/use-atom-query-runner", () => ({
+  useAtomQueryRunner: () => fileOpenMocks.query,
+}));
 vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("../state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/session")>()),
-  usePreparedConnection: () => ({ _tag: "Loading" }),
+  usePreparedConnection: () => ({ _tag: "Some", value: { httpBaseUrl: "https://remote.example" } }),
 }));
 vi.mock("../state/entities", () => ({
   readThreadShell: () => null,
@@ -49,7 +57,7 @@ vi.mock("../remoteOpen", () => ({
   useRemoteOpenResolution: () => ({ state: { mode: "local-exec" }, isResolved: true }),
 }));
 vi.mock("../editorPreferences", () => ({
-  useOpenInPreferredEditor: () => vi.fn(),
+  useOpenInPreferredEditor: () => fileOpenMocks.editor,
   usePreferredEditor: () => [null, vi.fn()],
 }));
 vi.mock("~/lib/openPullRequestLink", () => ({
@@ -928,5 +936,77 @@ describe("ChatMarkdown Windows file links", () => {
     expect(html).not.toContain("javascript:");
     expect(html).not.toContain("d:alert");
     expect(html).not.toContain("chat-markdown-file-link");
+  });
+});
+
+describe("HTML file modifier clicks", () => {
+  it.each([
+    ["/workspace/docs/report.html", "MacIntel", "metaKey", true],
+    ["/workspace/docs/report.HTM:12", "Linux x86_64", "ctrlKey", true],
+    ["/tmp/report.html", "MacIntel", "metaKey", true],
+    ["/workspace/docs/report.ts", "MacIntel", "metaKey", false],
+    ["/workspace/docs/report.pdf", "MacIntel", "metaKey", false],
+  ] as const)("opens %s correctly on %s", async (path, platform, modifier, browser) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("navigator", { platform });
+    const openExternal = vi.fn().mockResolvedValue(undefined);
+    const api = localApi.createLocalApi();
+    api.shell.openExternal = openExternal;
+    const shell = vi.spyOn(localApi, "readLocalApi").mockReturnValue(api);
+    fileOpenMocks.query.mockResolvedValue(
+      AsyncResult.success({
+        relativeUrl: "/api/assets/report?token=signed",
+        expiresAt: 123,
+      }),
+    );
+    fileOpenMocks.editor.mockResolvedValue(AsyncResult.success(undefined));
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown
+            cwd="/workspace"
+            threadRef={{
+              environmentId: EnvironmentId.make("remote"),
+              threadId: ThreadId.make("thread"),
+            }}
+            text={`[Report](${path})`}
+          />,
+        );
+      });
+      await act(async () => {
+        renderer!.root.findByType("a").props.onClick({
+          metaKey: modifier === "metaKey",
+          ctrlKey: modifier === "ctrlKey",
+          preventDefault() {},
+          stopPropagation() {},
+        });
+      });
+      if (browser) {
+        expect(openExternal).toHaveBeenCalledWith(
+          "https://remote.example/api/assets/report?token=signed",
+        );
+        expect(fileOpenMocks.editor).not.toHaveBeenCalled();
+        expect(fileOpenMocks.query).toHaveBeenCalledWith({
+          environmentId: "remote",
+          input: {
+            resource: {
+              _tag: path.startsWith("/tmp") ? "media-file" : "workspace-file",
+              threadId: "thread",
+              path: path.replace(/:12$/, ""),
+            },
+          },
+        });
+      } else {
+        expect(fileOpenMocks.editor).toHaveBeenCalledWith(path);
+        expect(openExternal).not.toHaveBeenCalled();
+      }
+    } finally {
+      await act(async () => renderer?.unmount());
+      shell.mockRestore();
+      fileOpenMocks.query.mockReset();
+      fileOpenMocks.editor.mockReset();
+      vi.unstubAllGlobals();
+    }
   });
 });

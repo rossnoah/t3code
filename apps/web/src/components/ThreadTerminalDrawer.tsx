@@ -1,3 +1,5 @@
+import { splitFilePathPosition } from "@t3tools/client-runtime/markdown-links";
+import { isHtmlFile, useOpenFileInDefaultBrowser } from "../browser/useOpenFileInDefaultBrowser";
 import { useAtomValue } from "@effect/atom-react";
 import {
   isAtomCommandInterrupted,
@@ -360,7 +362,11 @@ export function TerminalViewport({
     environmentId,
     serverConfig?.availableEditors ?? [],
   );
-  const openTerminalPath = useEffectEvent((target: string) => openInPreferredEditor(target));
+  const openFileInDefaultBrowser = useOpenFileInDefaultBrowser(threadRef, cwd);
+  const openTerminalPath = useEffectEvent((target: string) => {
+    const { path } = splitFilePathPosition(target);
+    return isHtmlFile(path) ? openFileInDefaultBrowser(path) : openInPreferredEditor(target);
+  });
   const openPreview = useAtomCommand(previewEnvironment.open, {
     reportFailure: false,
   });
