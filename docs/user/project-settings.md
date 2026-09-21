@@ -71,6 +71,30 @@ itself, or **Skip** to leave them for a setup script. It resolves in the same or
 workspace default: a `"worktreeSubmodules"` value in the `t3.json` of the branch being checked out
 applies when the project and environment are both on **Inherit**.
 
+## Copy local files into new worktrees
+
+Add `.worktreeinclude` at the root of your main checkout to copy selected Git-ignored
+files into each new worktree before its setup scripts run. Use one `.gitignore`-style
+pattern per line; comments, directory patterns, globs, and `!` exclusions work:
+
+```gitignore
+# Local development configuration
+.env*
+apps/**/.env
+config/local/**
+!config/local/*.example
+```
+
+Files come from the main checkout on the connected environment, even when you create
+another worktree from an existing worktree. Missing matches are skipped. Only ignored,
+untracked files are copied; files already present in the new checkout are preserved.
+The copies are independent, so editing one does not change the original. Symlinks to
+files outside the main checkout are skipped.
+
+Commit `.worktreeinclude` to share the patterns with your team. Without it, no local
+files are copied automatically. Changes apply to newly created worktrees; remove a
+pattern to stop copying that file in future worktrees.
+
 ## Storage cleanup
 
 Open **Settings → Storage** to enable automatic cleanup on one machine or all connected
