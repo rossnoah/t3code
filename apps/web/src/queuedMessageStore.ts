@@ -102,9 +102,15 @@ interface QueuedMessageStoreState {
 
 const EMPTY_QUEUE: QueuedComposerMessage[] = [];
 
-type QueueState = Pick<QueuedMessageStoreState, "queuesByThreadKey" | "lastDispatchByThreadKey">;
+type QueueState = Pick<
+  QueuedMessageStoreState,
+  "queuesByThreadKey" | "lastDispatchByThreadKey" | "pausedByThreadKey"
+>;
 
-/** Replaces one thread's queue. `lastDispatch` null forgets it; an empty queue always does. */
+/**
+ * Replaces one thread's queue. `lastDispatch` null forgets it; an empty queue
+ * always does, and forgets its pause too.
+ */
 function withQueue(
   state: QueueState,
   threadKey: string,
@@ -116,7 +122,17 @@ function withQueue(
   if (lastDispatch) lastDispatchByThreadKey[threadKey] = lastDispatch;
   if (queue.length === 0) delete queuesByThreadKey[threadKey];
   if (queue.length === 0 || lastDispatch === null) delete lastDispatchByThreadKey[threadKey];
-  return { queuesByThreadKey, lastDispatchByThreadKey };
+  if (queue.length > 0 || !(threadKey in state.pausedByThreadKey)) {
+    return {
+      queuesByThreadKey,
+      lastDispatchByThreadKey,
+      pausedByThreadKey: state.pausedByThreadKey,
+    };
+  }
+  // Pause belongs to the waiting messages, not to future queues in this thread.
+  const pausedByThreadKey = { ...state.pausedByThreadKey };
+  delete pausedByThreadKey[threadKey];
+  return { queuesByThreadKey, lastDispatchByThreadKey, pausedByThreadKey };
 }
 
 /** Queues belong to this client session, scoped to an environment and thread. */
@@ -144,7 +160,9 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
       if (!entry || queue.some((message) => message.sending)) return null;
       update(
         threadKey,
-        queue.map((message) => (message.id === id ? { ...message, sending: "preparing" } : message)),
+        queue.map((message) =>
+          message.id === id ? { ...message, sending: "preparing" } : message,
+        ),
       );
       const completion = Date.parse(completedAt ?? "");
       if (Number.isFinite(completion)) {
@@ -213,19 +231,15 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
       set((state) => {
         // A message still preparing (uploads, thread settings) goes back to
         // waiting; its send sees that at markDispatching and gives up.
-        const queue = state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE;
-        const hasPreparing = queue.some((message) => message.sending === "preparing");
+        const queue = (state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE).map(
+          ({ sending, ...message }) =>
+            sending === "dispatching" ? { ...message, sending } : message,
+        );
+        const next = withQueue(state, threadKey, queue);
+        // Stop with nothing queued leaves the next queue free to start.
         return {
-          pausedByThreadKey: { ...state.pausedByThreadKey, [threadKey]: true },
-          ...(hasPreparing
-            ? withQueue(
-                state,
-                threadKey,
-                queue.map(({ sending, ...message }) =>
-                  sending === "dispatching" ? { ...message, sending } : message,
-                ),
-              )
-            : {}),
+          ...next,
+          pausedByThreadKey: { ...next.pausedByThreadKey, [threadKey]: queue.length > 0 },
         };
       }),
     resume: (threadKey) =>
