@@ -85,7 +85,11 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
       const queuesByThreadKey = { ...state.queuesByThreadKey };
       if (remaining.length === 0) delete queuesByThreadKey[threadKey];
       else queuesByThreadKey[threadKey] = remaining;
-      return { queuesByThreadKey };
+      if (remaining.length > 0) return { queuesByThreadKey };
+      // Pause belongs to the waiting messages, not to future queues in this thread.
+      const pausedByThreadKey = { ...state.pausedByThreadKey };
+      delete pausedByThreadKey[threadKey];
+      return { queuesByThreadKey, pausedByThreadKey };
     });
     return entry;
   },
@@ -105,7 +109,10 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
   },
   pause: (threadKey) =>
     set((state) => ({
-      pausedByThreadKey: { ...state.pausedByThreadKey, [threadKey]: true },
+      pausedByThreadKey: {
+        ...state.pausedByThreadKey,
+        [threadKey]: (state.queuesByThreadKey[threadKey]?.length ?? 0) > 0,
+      },
       // Even an empty queue can have a message awaiting an upload. Scope the
       // cancellation to this thread so stopping another chat cannot cancel it.
       pauseGenerationByThreadKey: {
