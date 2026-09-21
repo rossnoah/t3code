@@ -65,6 +65,13 @@ async function checkFork() {
     "apps/server/src/project/ProjectSetupScriptRunner.test.ts",
     "scripts/build-desktop-artifact.test.ts",
   ]);
+  await runCheck("vp", [
+    "test",
+    "run",
+    "apps/server/src/vcs/GitVcsDriverCore.test.ts",
+    "-t",
+    "worktree operations",
+  ]);
   // Install once before desktop tests import Electron from parallel workers.
   await runCheck("node", ["apps/desktop/scripts/ensure-electron-runtime.mjs"]);
   await runCheck("vp", [
