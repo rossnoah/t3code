@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - realpathSync.native resolves Windows 8.3 short names, which the Effect realPath does not.
 import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, it, describe } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -2494,6 +2495,202 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         );
       }),
     );
+
+    it.effect("copies only ignored .worktreeinclude matches with gitignore pattern semantics", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* writeTextFile(
+          cwd,
+          ".gitignore",
+          ".env*\nsecrets/\nroot-only\n# literal names below\n\\#local\n",
+        );
+        yield* writeTextFile(
+          cwd,
+          ".worktreeinclude",
+          "# local config\r\n\r\n.env*\r\nsecrets/**\r\n!secrets/*.example\r\n/root-only\r\n\\#local\r\nuntracked.txt\r\nREADME.md\r\nmissing.env\r\n",
+        );
+        yield* git(cwd, ["add", ".gitignore", ".worktreeinclude"]);
+        yield* git(cwd, ["commit", "-m", "worktree include patterns"]);
+        const included = [
+          ".env",
+          "apps/api/.env.local",
+          "secrets/local.json",
+          "root-only",
+          "#local",
+        ];
+        const excluded = ["secrets/local.example", "nested/root-only", "untracked.txt"];
+        for (const name of [...included, ...excluded]) yield* writeTextFile(cwd, name, name);
+        yield* writeTextFile(cwd, "README.md", "uncommitted source change");
+        const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "included");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.createWorktree({
+          cwd,
+          path: worktreePath,
+          refName: initialBranch,
+          newRefName: "feature/includes",
+        });
+        for (const name of included)
+          assert.equal(yield* fs.readFileString(path.join(worktreePath, name)), name);
+        for (const name of excluded)
+          assert.isFalse(yield* fs.exists(path.join(worktreePath, name)), name);
+        assert.equal(yield* fs.readFileString(path.join(worktreePath, "README.md")), "# test\n");
+        yield* fs.writeFileString(path.join(worktreePath, ".env"), "independent copy");
+        assert.equal(yield* fs.readFileString(path.join(cwd, ".env")), ".env");
+      }),
+    );
+
+    it.effect(
+      "reads .worktreeinclude and local files from the main checkout when creating from a linked worktree",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          yield* writeTextFile(cwd, ".gitignore", ".env\n");
+          yield* git(cwd, ["add", ".gitignore"]);
+          yield* git(cwd, ["commit", "-m", "ignore environment"]);
+          yield* writeTextFile(cwd, ".worktreeinclude", ".env\n");
+          yield* writeTextFile(cwd, ".env", "main environment");
+          const root = yield* makeTmpDir("git-worktrees-");
+          const linked = path.join(root, "linked");
+          yield* git(cwd, ["worktree", "add", "-b", "linked", linked]);
+          yield* writeTextFile(linked, ".worktreeinclude", "not-the-main-pattern\n");
+          yield* writeTextFile(linked, ".env", "linked environment");
+          yield* fs.makeDirectory(path.join(linked, "nested"));
+          const worktreePath = path.join(root, "included");
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* driver.createWorktree({
+            cwd: path.join(linked, "nested"),
+            path: worktreePath,
+            refName: initialBranch,
+            newRefName: "feature/from-linked",
+          });
+          assert.equal(
+            yield* fs.readFileString(path.join(worktreePath, ".env")),
+            "main environment",
+          );
+        }),
+    );
+
+    it.effect(
+      "does not overwrite a file tracked on the target branch with an included local file",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          yield* writeTextFile(cwd, ".gitignore", ".env\n");
+          yield* git(cwd, ["add", ".gitignore"]);
+          yield* git(cwd, ["commit", "-m", "ignore environment"]);
+          yield* git(cwd, ["checkout", "-b", "target"]);
+          yield* writeTextFile(cwd, ".env", "tracked on target");
+          yield* git(cwd, ["add", "--force", ".env"]);
+          yield* git(cwd, ["commit", "-m", "target config"]);
+          yield* git(cwd, ["checkout", initialBranch]);
+          yield* writeTextFile(cwd, ".worktreeinclude", ".env\n");
+          yield* writeTextFile(cwd, ".env", "local environment");
+          const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "included");
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* driver.createWorktree({ cwd, path: worktreePath, refName: "target" });
+          assert.equal(
+            yield* fs.readFileString(path.join(worktreePath, ".env")),
+            "tracked on target",
+          );
+        }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "does not copy .worktreeinclude symlinks outside the main checkout",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const outside = yield* makeTmpDir();
+          yield* writeTextFile(outside, ".env", "outside environment");
+          yield* writeTextFile(cwd, ".gitignore", ".env*\n");
+          yield* writeTextFile(cwd, ".worktreeinclude", ".env*\n");
+          yield* writeTextFile(cwd, ".env.local", "inside environment");
+          yield* fs.symlink(path.join(outside, ".env"), path.join(cwd, ".env.outside"));
+          yield* fs.symlink(path.join(cwd, ".env.local"), path.join(cwd, ".env.inside"));
+          const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "included");
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* driver.createWorktree({
+            cwd,
+            path: worktreePath,
+            refName: initialBranch,
+            newRefName: "feature/symlinks",
+          });
+          assert.isFalse(yield* fs.exists(path.join(worktreePath, ".env.outside")));
+          assert.equal(
+            yield* fs.readFileString(path.join(worktreePath, ".env.inside")),
+            "inside environment",
+          );
+          yield* fs.writeFileString(path.join(worktreePath, ".env.inside"), "independent");
+          assert.equal(
+            yield* fs.readFileString(path.join(cwd, ".env.local")),
+            "inside environment",
+          );
+        }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "rejects .worktreeinclude copies through destination symlinks outside the worktree",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const outside = yield* makeTmpDir();
+          yield* git(cwd, ["checkout", "-b", "target"]);
+          yield* fs.symlink(outside, path.join(cwd, "config"));
+          yield* git(cwd, ["add", "config"]);
+          yield* git(cwd, ["commit", "-m", "target symlink"]);
+          yield* git(cwd, ["checkout", initialBranch]);
+          yield* writeTextFile(cwd, ".gitignore", "config/\n");
+          yield* writeTextFile(cwd, ".worktreeinclude", "config/\n");
+          yield* writeTextFile(cwd, "config/nested/.env", "local environment");
+          const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "included");
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const error = yield* Effect.flip(
+            driver.createWorktree({ cwd, path: worktreePath, refName: "target" }),
+          );
+          assert.include(error.detail, "outside the worktree");
+          assert.isFalse(yield* fs.exists(path.join(outside, "nested")));
+        }),
+    );
+
+    for (const patterns of [undefined, "", "# no files\n"]) {
+      it.effect(
+        `does not copy ignored files with ${patterns === undefined ? "no" : "empty"} .worktreeinclude`,
+        () =>
+          Effect.gen(function* () {
+            const cwd = yield* makeTmpDir();
+            const { initialBranch } = yield* initRepoWithCommit(cwd);
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            yield* writeTextFile(cwd, ".gitignore", ".env\n");
+            yield* writeTextFile(cwd, ".env", "local environment");
+            if (patterns !== undefined) yield* writeTextFile(cwd, ".worktreeinclude", patterns);
+            const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "included");
+            const driver = yield* GitVcsDriver.GitVcsDriver;
+            yield* driver.createWorktree({
+              cwd,
+              path: worktreePath,
+              refName: initialBranch,
+              newRefName: "feature/no-includes",
+            });
+            assert.isFalse(yield* fs.exists(path.join(worktreePath, ".env")));
+          }),
+      );
+    }
 
     it.effect("creates and removes a worktree for a new refName", () =>
       Effect.gen(function* () {
