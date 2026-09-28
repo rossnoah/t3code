@@ -1,4 +1,5 @@
 import type { ClientSettings } from "@t3tools/contracts/settings";
+import { ProviderInstanceId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { act } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
@@ -99,9 +100,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   useQueuedMessageStore.setState({
     queuesByThreadKey: {},
+    lastDispatchByThreadKey: {},
     pausedByThreadKey: {},
-    pauseGenerationByThreadKey: {},
     suppressedCompletionByThreadKey: {},
+    interactingThreadKey: null,
   });
   Object.assign(state, {
     mode: "off",
@@ -137,6 +139,12 @@ afterEach(async () => {
 });
 
 describe("thread notifications", () => {
+  // What sendQueuedMessage does to the store once a queued send goes out.
+  function send(threadKey: string, id: string, completedAt: string | null) {
+    useQueuedMessageStore.getState().beginSend(threadKey, id, completedAt);
+    useQueuedMessageStore.getState().finishSend(threadKey, id);
+  }
+
   function enqueue(threadKey = "env-1:thread-1") {
     return useQueuedMessageStore.getState().enqueue(threadKey, {
       prompt: "Next task",
@@ -145,7 +153,12 @@ describe("thread notifications", () => {
       terminalContexts: [],
       previewAnnotations: [],
       reviewComments: [],
-      submissionIntent: "foreground",
+      sendSettings: {
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        promptEffort: null,
+      },
       createdAt: "2026-09-13T09:59:00.000Z",
     });
   }
@@ -162,7 +175,7 @@ describe("thread notifications", () => {
       expect(state.notification).not.toHaveBeenCalled();
       expect(state.sound).not.toHaveBeenCalled();
 
-      useQueuedMessageStore.getState().take("env-1:thread-1", message.id, state.completedAt);
+      send("env-1:thread-1", message.id, state.completedAt);
       await render();
       expect(state.sound).not.toHaveBeenCalled();
       state.completedAt = null;
@@ -179,7 +192,7 @@ describe("thread notifications", () => {
     state.mode = "notifications-and-sound";
     await render();
     const message = enqueue();
-    useQueuedMessageStore.getState().take("env-1:thread-1", message.id, "2026-09-13T10:00:00.000Z");
+    send("env-1:thread-1", message.id, "2026-09-13T10:00:00.000Z");
     await complete();
     expect(state.add).not.toHaveBeenCalled();
     expect(state.sound).not.toHaveBeenCalled();

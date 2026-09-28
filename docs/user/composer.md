@@ -19,8 +19,7 @@ Attach up to 100 files per message. Each image can be up to 10 MiB, with at most
 50 MiB each, subject to the environment's upload support and limit. The agent
 receives them on the environment's machine. Provider and model limits still
 apply, including images already in the conversation. A video attachment gives
-the agent a file path; it does not enable native video input. Antigravity does
-not accept video attachments.
+the agent a file path; it does not enable native video input.
 
 Uploads begin when you add an attachment. All uploads must finish before the
 message can send. Retry or remove a failed upload. On web and desktop, reloading
@@ -46,8 +45,8 @@ Sending one message immediately does not resume the remaining paused messages.
 New messages join any remaining queued messages in order. Once the queue is empty,
 the next queued message starts unpaused, even if you previously pressed Stop.
 
-Queues stay in the current client session and send while that thread is open.
-They are not shared between devices or preserved when the client reloads.
+Queues stay in the current client session and send even while you have another
+thread open. They are not shared between devices or preserved when the client reloads.
 
 In **Settings → General → Follow-up behavior**, choose **Queue** to keep this
 behavior or **Steer** to send new messages immediately. This setting applies to

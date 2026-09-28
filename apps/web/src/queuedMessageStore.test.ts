@@ -1,6 +1,9 @@
+import { ProviderInstanceId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
+import { createLocalDispatchSnapshot } from "./components/ChatView.logic";
 import {
+  isQueuedCompletionSuppressed,
   isQueuedMessageDue,
   shouldQueueFollowUp,
   useQueuedMessageStore,
@@ -15,19 +18,27 @@ function makeMessage(prompt: string): Omit<QueuedComposerMessage, "id"> {
     terminalContexts: [],
     previewAnnotations: [],
     reviewComments: [],
-    submissionIntent: "foreground",
+    sendSettings: {
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      promptEffort: null,
+    },
     createdAt: "2026-09-11T00:00:00.000Z",
   };
 }
 const queue = (key = "thread-a") => useQueuedMessageStore.getState().queuesByThreadKey[key] ?? [];
+const paused = (key = "thread-a") =>
+  useQueuedMessageStore.getState().pausedByThreadKey[key] ?? false;
 
 describe("queuedMessageStore", () => {
   beforeEach(() => {
     useQueuedMessageStore.setState({
       queuesByThreadKey: {},
+      lastDispatchByThreadKey: {},
       pausedByThreadKey: {},
-      pauseGenerationByThreadKey: {},
       suppressedCompletionByThreadKey: {},
+      interactingThreadKey: null,
     });
   });
 
@@ -40,13 +51,94 @@ describe("queuedMessageStore", () => {
     expect(queue("thread-b").map((message) => message.prompt)).toEqual(["other"]);
   });
 
-  it("hands a message to exactly one sender", () => {
-    const { enqueue, take } = useQueuedMessageStore.getState();
+  it("allows one send per thread", () => {
+    const { enqueue, beginSend } = useQueuedMessageStore.getState();
     const first = enqueue("thread-a", makeMessage("first"));
     const second = enqueue("thread-a", makeMessage("second"));
-    expect(take("thread-a", first.id)).toEqual(first);
-    expect(take("thread-a", first.id)).toBeNull();
-    expect(queue()).toEqual([second]);
+
+    expect(beginSend("thread-a", first.id, null)?.prompt).toBe("first");
+    expect(beginSend("thread-a", first.id, null)).toBeNull();
+    expect(beginSend("thread-a", second.id, null)).toBeNull();
+    expect(queue().map((message) => message.sending)).toEqual(["preparing", undefined]);
+  });
+
+  it("finishSend drops the sent message", () => {
+    const { enqueue, beginSend, finishSend } = useQueuedMessageStore.getState();
+    const first = enqueue("thread-a", makeMessage("first"));
+    beginSend("thread-a", first.id, null);
+
+    finishSend("thread-a", first.id);
+
+    expect(useQueuedMessageStore.getState().queuesByThreadKey["thread-a"]).toBeUndefined();
+  });
+
+  it("returns failed sends to the head and pauses the whole queue", () => {
+    const { enqueue, beginSend, failSend } = useQueuedMessageStore.getState();
+    enqueue("thread-a", makeMessage("first"));
+    const second = enqueue("thread-a", makeMessage("second"));
+    beginSend("thread-a", second.id, null);
+
+    expect(failSend("thread-a", second.id)).toBe(true);
+
+    expect(queue().map((message) => message.prompt)).toEqual(["second", "first"]);
+    expect(queue()[0]?.sending).toBeUndefined();
+    expect(paused()).toBe(true);
+  });
+
+  it("remove refuses a message being sent", () => {
+    const { enqueue, remove, beginSend } = useQueuedMessageStore.getState();
+    const first = enqueue("thread-a", makeMessage("first"));
+    const second = enqueue("thread-a", makeMessage("second"));
+
+    expect(remove("thread-a", second.id)?.prompt).toBe("second");
+    expect(remove("thread-a", second.id)).toBeNull();
+    expect(queue()).toEqual([first]);
+
+    beginSend("thread-a", first.id, null);
+    expect(remove("thread-a", first.id)).toBeNull();
+  });
+
+  it("a failed send keeps waiting on the dispatch before it", () => {
+    const { enqueue, beginSend, markDispatching, finishSend, failSend } =
+      useQueuedMessageStore.getState();
+    const earlier = createLocalDispatchSnapshot(undefined);
+    const first = enqueue("thread-a", makeMessage("first"));
+    const second = enqueue("thread-a", makeMessage("second"));
+    const third = enqueue("thread-a", makeMessage("third"));
+    const lastDispatch = () => useQueuedMessageStore.getState().lastDispatchByThreadKey["thread-a"];
+    beginSend("thread-a", first.id, null);
+    markDispatching("thread-a", first.id, earlier);
+    finishSend("thread-a", first.id);
+
+    // Fails before its turn start went out: the first send is still the one to wait on.
+    beginSend("thread-a", second.id, null);
+    failSend("thread-a", second.id);
+    expect(lastDispatch()?.thread).toBe(earlier);
+
+    // Fails after going out: it never reached the server, so the first still counts.
+    beginSend("thread-a", third.id, null);
+    markDispatching("thread-a", third.id, { ...earlier, startedAt: "later" });
+    failSend("thread-a", third.id);
+    expect(lastDispatch()?.thread).toBe(earlier);
+  });
+
+  it("pausing takes back a preparing send but not one already dispatching", () => {
+    const { enqueue, beginSend, markDispatching, pause } = useQueuedMessageStore.getState();
+    const preparing = enqueue("thread-a", makeMessage("preparing"));
+    const waiting = enqueue("thread-a", makeMessage("waiting"));
+    beginSend("thread-a", preparing.id, null);
+
+    pause("thread-a");
+    expect(queue()).toEqual([preparing, waiting]);
+    expect(markDispatching("thread-a", preparing.id, createLocalDispatchSnapshot(undefined))).toBe(
+      false,
+    );
+
+    const dispatching = enqueue("thread-b", makeMessage("dispatching"));
+    beginSend("thread-b", dispatching.id, null);
+    markDispatching("thread-b", dispatching.id, createLocalDispatchSnapshot(undefined));
+    pause("thread-b");
+    expect(queue("thread-b")[0]?.sending).toBe("dispatching");
   });
 
   it("pauses without moving messages and keeps later submissions paused", () => {
@@ -55,117 +147,93 @@ describe("queuedMessageStore", () => {
     pause("thread-a");
     const second = enqueue("thread-a", makeMessage("second"));
     expect(queue()).toEqual([first, second]);
-    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(true);
+    expect(paused()).toBe(true);
     resume("thread-a");
     expect(queue()).toEqual([first, second]);
-    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(false);
-  });
-
-  it("sending a selected message immediately leaves a paused queue paused", () => {
-    const { enqueue, pause, take } = useQueuedMessageStore.getState();
-    const first = enqueue("thread-a", makeMessage("first"));
-    const second = enqueue("thread-a", makeMessage("second"));
-    pause("thread-a");
-    expect(take("thread-a", second.id)).toEqual(second);
-    expect(queue()).toEqual([first]);
-    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(true);
+    expect(paused()).toBe(false);
   });
 
   it("starts a fresh queue unpaused after Stop with no queued messages", () => {
     const { enqueue, pause } = useQueuedMessageStore.getState();
     pause("thread-a");
     const message = enqueue("thread-a", makeMessage("follow-up after restarting"));
-    const paused = useQueuedMessageStore.getState().pausedByThreadKey["thread-a"] ?? false;
 
     expect(queue()).toEqual([message]);
-    expect(isQueuedMessageDue({ phase: "running", paused })).toBe(false);
-    expect(isQueuedMessageDue({ phase: "ready", paused })).toBe(true);
+    expect(isQueuedMessageDue({ phase: "running", paused: paused() })).toBe(false);
+    expect(isQueuedMessageDue({ phase: "ready", paused: paused() })).toBe(true);
     expect(
       shouldQueueFollowUp({
         isRunning: true,
         hasQueuedMessages: false,
-        paused,
+        paused: paused(),
         followUpBehavior: "steer",
       }),
     ).toBe(false);
   });
 
-  it.each(["remove", "take"] as const)(
+  it.each(["remove", "send"] as const)(
     "starts a fresh queue unpaused after %s empties a paused queue",
     (action) => {
-      const { enqueue, pause } = useQueuedMessageStore.getState();
+      const { enqueue, pause, remove, beginSend, finishSend } = useQueuedMessageStore.getState();
       const previous = enqueue("thread-a", makeMessage("previous"));
       pause("thread-a");
-      useQueuedMessageStore.getState()[action]("thread-a", previous.id);
-      expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"] ?? false).toBe(false);
+      if (action === "remove") remove("thread-a", previous.id);
+      else {
+        beginSend("thread-a", previous.id, null);
+        finishSend("thread-a", previous.id);
+      }
+      expect(paused()).toBe(false);
       const next = enqueue("thread-a", makeMessage("next"));
 
       expect(queue()).toEqual([next]);
-      expect(
-        isQueuedMessageDue({
-          phase: "ready",
-          paused: useQueuedMessageStore.getState().pausedByThreadKey["thread-a"] ?? false,
-        }),
-      ).toBe(true);
+      expect(isQueuedMessageDue({ phase: "ready", paused: paused() })).toBe(true);
     },
   );
 
-  it("keeps a stopped upload cancelled when a new queue starts before it returns", () => {
-    const { enqueue, take, pause, holdAtFront } = useQueuedMessageStore.getState();
-    const uploading = enqueue("thread-a", makeMessage("upload"));
-    take("thread-a", uploading.id);
-    const generationAtTake =
-      useQueuedMessageStore.getState().pauseGenerationByThreadKey["thread-a"] ?? 0;
-    pause("thread-a");
-    const next = enqueue("thread-a", makeMessage("next"));
-
-    expect(useQueuedMessageStore.getState().pauseGenerationByThreadKey["thread-a"]).toBe(
-      generationAtTake + 1,
-    );
-    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"] ?? false).toBe(false);
-    holdAtFront("thread-a", uploading);
-    expect(queue()).toEqual([uploading, next]);
-    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(true);
-  });
-
-  it("invalidates an in-flight upload even when it took the last queued message", () => {
-    const { enqueue, take, pause, resume } = useQueuedMessageStore.getState();
-    const message = enqueue("thread-a", makeMessage("upload"));
-    take("thread-a", message.id);
-    pause("thread-b");
-    expect(useQueuedMessageStore.getState().pauseGenerationByThreadKey["thread-a"] ?? 0).toBe(0);
-    pause("thread-a");
-    resume("thread-a");
-    expect(useQueuedMessageStore.getState().pauseGenerationByThreadKey["thread-a"]).toBe(1);
-    expect(useQueuedMessageStore.getState().pauseGenerationByThreadKey["thread-b"]).toBe(1);
-  });
-
   it("clearing a failed queue does not pause a fresh queue or another thread", () => {
-    const { enqueue, take, holdAtFront, pause, remove } = useQueuedMessageStore.getState();
+    const { enqueue, beginSend, failSend, pause, remove } = useQueuedMessageStore.getState();
     const failed = enqueue("thread-a", makeMessage("failed send"));
     const other = enqueue("thread-b", makeMessage("other thread"));
     pause("thread-b");
-    take("thread-a", failed.id);
-    holdAtFront("thread-a", failed);
+    beginSend("thread-a", failed.id, null);
+    failSend("thread-a", failed.id);
     remove("thread-a", failed.id);
     enqueue("thread-a", makeMessage("fresh follow-up"));
 
-    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"] ?? false).toBe(false);
-    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-b"]).toBe(true);
+    expect(paused()).toBe(false);
+    expect(paused("thread-b")).toBe(true);
     expect(queue("thread-b")).toEqual([other]);
   });
 
-  it("returns failed sends to the head and pauses the whole queue", () => {
-    const { enqueue, take, holdAtFront, reorder } = useQueuedMessageStore.getState();
+  it("sending a selected message immediately leaves a paused queue paused", () => {
+    const { enqueue, pause, beginSend, finishSend } = useQueuedMessageStore.getState();
     const first = enqueue("thread-a", makeMessage("first"));
     const second = enqueue("thread-a", makeMessage("second"));
-    take("thread-a", first.id);
-    holdAtFront("thread-a", first);
-    holdAtFront("thread-a", first);
-    expect(queue()).toEqual([first, second]);
-    reorder("thread-a", first.id, second.id);
-    expect(queue()).toEqual([second, first]);
-    expect(useQueuedMessageStore.getState().pausedByThreadKey["thread-a"]).toBe(true);
+    pause("thread-a");
+    beginSend("thread-a", second.id, null);
+    finishSend("thread-a", second.id);
+    expect(queue()).toEqual([first]);
+    expect(paused()).toBe(true);
+  });
+
+  it("suppresses the completion alert of the turn a queued send follows", () => {
+    const { enqueue, beginSend, finishSend } = useQueuedMessageStore.getState();
+    const completedAt = "2026-09-11T00:01:00.000Z";
+    const message = enqueue("thread-a", makeMessage("next"));
+    expect(isQueuedCompletionSuppressed("thread-a", 0)).toBe(true);
+    beginSend("thread-a", message.id, completedAt);
+    finishSend("thread-a", message.id);
+    expect(isQueuedCompletionSuppressed("thread-a", Date.parse(completedAt))).toBe(true);
+    expect(isQueuedCompletionSuppressed("thread-a", Date.parse(completedAt) + 1)).toBe(false);
+  });
+
+  it("holds only the thread being dragged or edited", () => {
+    const { setInteracting } = useQueuedMessageStore.getState();
+    setInteracting("thread-a", true);
+    setInteracting("thread-b", false);
+    expect(useQueuedMessageStore.getState().interactingThreadKey).toBe("thread-a");
+    setInteracting("thread-a", false);
+    expect(useQueuedMessageStore.getState().interactingThreadKey).toBeNull();
   });
 
   it("reorders both directions without changing payloads or other threads", () => {

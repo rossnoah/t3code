@@ -323,14 +323,14 @@ import {
   reviewCommentContextLabel,
   terminalContextReference,
 } from "../lib/composerContextRecords";
-import { QueuedMessagesPanel } from "./chat/QueuedMessagesPanel";
 import {
-  isQueuedMessageDue,
   shouldQueueFollowUp,
-  type QueuedComposerMessage,
+  type QueuedMessageSendSettings,
   useQueuedMessages,
   useQueuedMessageStore,
 } from "../queuedMessageStore";
+import { QueuedMessagesPanel } from "./chat/QueuedMessagesPanel";
+import { sendQueuedMessage } from "./chat/sendQueuedMessage";
 import { type ReviewCommentContext } from "../reviewCommentContext";
 import { environmentCatalog } from "../connection/catalog";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
@@ -642,6 +642,8 @@ const TYPE_TO_FOCUS_INTERACTIVE_SELECTOR = [
   '[role="switch"]',
   '[role="tab"]',
 ].join(",");
+// Popups match only while open or closing: some stay mounted when closed,
+// such as the chat header actions menu.
 const TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR = [
   '[role="dialog"][aria-modal="true"]',
   '[data-slot="alert-dialog-popup"]:is([data-open],[data-ending-style])',
@@ -649,11 +651,11 @@ const TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR = [
   '[data-slot="dialog-popup"]:is([data-open],[data-ending-style])',
   '[data-slot="sheet-popup"]:is([data-open],[data-ending-style])',
   '[data-slot="sidebar"][data-mobile="true"]:is([data-open],[data-ending-style])',
-  '[data-slot="menu-popup"]',
-  '[data-slot="select-popup"]',
-  '[data-slot="popover-popup"]',
-  '[data-slot="combobox-popup"]',
-  '[data-slot="autocomplete-popup"]',
+  '[data-slot="menu-popup"]:is([data-open],[data-ending-style])',
+  '[data-slot="select-popup"]:is([data-open],[data-ending-style])',
+  '[data-slot="popover-popup"]:is([data-open],[data-ending-style])',
+  '[data-slot="combobox-popup"]:is([data-open],[data-ending-style])',
+  '[data-slot="autocomplete-popup"]:is([data-open],[data-ending-style])',
 ].join(",");
 
 type EnvironmentUnavailableState = {
@@ -915,7 +917,14 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
-  const serverThread = useThread(threadRef, { waitForShell: draftThread !== null });
+  // Hidden drawers stay mounted (see MAX_HIDDEN_MOUNTED_TERMINAL_THREADS), so they read only
+  // the shell: a detail subscription would keep each hidden thread's history in memory. The
+  // active drawer shares ChatView's detail, which also covers archived threads (no shell).
+  const activeServerThread = useThread(active ? threadRef : null, {
+    waitForShell: draftThread !== null,
+  });
+  const serverThreadShell = useThreadShell(threadRef);
+  const serverThread = activeServerThread ?? serverThreadShell;
   const projectRef = serverThread
     ? scopeProjectRef(serverThread.environmentId, serverThread.projectId)
     : draftThread
@@ -2695,68 +2704,40 @@ export default function ChatView(props: ChatViewProps) {
       unavailableConnection !== null &&
       (unavailableConnection.phase === "connecting" ||
         unavailableConnection.phase === "reconnecting");
-    // Reconnecting to a version-skewed server with no update in flight
-    // usually means the server is restarting mid-update and a refresh wiped
-    // the in-memory update state. Fold the reconnect and version banners
-    // into one calm line instead of stacking "Failed to connect" on
-    // "versions differ". A failed update never folds: its error and retry
-    // action must stay visible.
-    const reconnectingThroughVersionSkew =
-      serverUpdateState.status === "idle" && environmentReconnecting && versionMismatch !== null;
     // While an update runs, transient connect blips are expected (the server
     // restarts) and the update banner already shows progress. Hard failure
     // phases still surface so the Reconnect action stays reachable.
     const suppressUnavailableBanner =
-      environmentReconnecting &&
-      (updateRunning || (!reconnectingThroughVersionSkew && !reconnectWarningGraceElapsed));
+      environmentReconnecting && (updateRunning || !reconnectWarningGraceElapsed);
     if (activeEnvironmentUnavailableState && unavailableConnection && !suppressUnavailableBanner) {
-      if (reconnectingThroughVersionSkew) {
-        items.push({
-          id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
-          variant: "default",
-          // Prioritize live connection progress among the notices.
-          priority: "urgent",
-          icon: (
-            <span
-              className="size-1.5 animate-status-pulse rounded-full bg-foreground"
-              aria-hidden="true"
-            />
-          ),
-          title: `${unavailableConnection.phase === "connecting" ? "Connecting" : "Reconnecting"} to ${activeEnvironmentUnavailableState.label}`,
-          description: "Finishing an update",
-          actions: disconnectAction,
-        });
-      } else {
-        items.push({
-          id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
-          variant: unavailableConnection.phase === "error" ? "error" : "warning",
-          icon: <WifiOffIcon />,
-          title: `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
-          actions: (
-            <>
-              {!environmentReconnecting ? (
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  onClick={() =>
-                    void handleReconnectActiveEnvironment(
-                      activeEnvironmentUnavailableState.environmentId,
-                    )
-                  }
-                >
-                  Reconnect
-                </Button>
-              ) : null}
-              {disconnectAction}
-            </>
-          ),
-        });
-      }
+      items.push({
+        id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
+        variant: unavailableConnection.phase === "error" ? "error" : "warning",
+        icon: <WifiOffIcon />,
+        title: `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
+        actions: (
+          <>
+            {!environmentReconnecting ? (
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={() =>
+                  void handleReconnectActiveEnvironment(
+                    activeEnvironmentUnavailableState.environmentId,
+                  )
+                }
+              >
+                Reconnect
+              </Button>
+            ) : null}
+            {disconnectAction}
+          </>
+        ),
+      });
     }
     if (
       !automaticEnvironment &&
       serverUpdateEnvironmentId &&
-      !reconnectingThroughVersionSkew &&
       (serverUpdateState.status === "idle"
         ? showVersionMismatchBanner
         : !serverUpdateFailureDismissed)
@@ -4208,7 +4189,7 @@ export default function ChatView(props: ChatViewProps) {
         });
       }
       if (script.kind === "prompt") {
-        await onSendRef.current?.(undefined, "foreground", undefined, undefined, script.prompt);
+        await onSendRef.current?.(undefined, "foreground", undefined, script.prompt);
         return;
       }
       const targetCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
@@ -5843,6 +5824,7 @@ export default function ChatView(props: ChatViewProps) {
     activeWorktreePath,
     hasServerThread: isServerThread,
     draftThreadEnvMode: isLocalDraftThread ? draftThread?.envMode : undefined,
+    preparingWorktree: isPreparingWorktree,
   });
   const canOverrideServerThreadEnvMode = Boolean(
     isServerThread &&
@@ -6297,6 +6279,9 @@ export default function ChatView(props: ChatViewProps) {
     }
     const working = activeBackgroundLiveness === "working";
     const liveCount = agentPanelModel.liveCount;
+    // Hidden once the Agents surface is on screen; the link would point at nothing.
+    const showViewAgents =
+      liveCount > 0 && !(rightPanelOpen && activeRightPanelSurface?.kind === "agents");
     return {
       id: `background-liveness:${activeThread.id}`,
       variant: "default",
@@ -6313,22 +6298,32 @@ export default function ChatView(props: ChatViewProps) {
           : "Background work"
         : "Monitoring",
       actions: (
-        <Button
-          size="xs"
-          variant="ghost"
-          disabled={isStoppingBackgroundWork}
-          onClick={() => void handleStopBackgroundWork()}
-        >
-          {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
-        </Button>
+        <>
+          {showViewAgents ? (
+            <Button size="xs" variant="ghost" aria-label="View agents" onClick={addAgentsSurface}>
+              View
+            </Button>
+          ) : null}
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={isStoppingBackgroundWork}
+            onClick={() => void handleStopBackgroundWork()}
+          >
+            {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
+          </Button>
+        </>
       ),
     };
   }, [
     activeBackgroundLiveness,
+    activeRightPanelSurface?.kind,
     activeThread,
+    addAgentsSurface,
     agentPanelModel.liveCount,
     handleStopBackgroundWork,
     isStoppingBackgroundWork,
+    rightPanelOpen,
   ]);
   // A woken thread announces itself in the open view, not just the sidebar
   // pill. Dismissing marks the wake as seen (same acknowledgment as the
@@ -6674,10 +6669,6 @@ export default function ChatView(props: ChatViewProps) {
     terminalUiOpenByThreadRef.current[activeThreadKey] = current;
   }, [activeThreadKey, focusComposer, terminalUiState.terminalOpen]);
 
-  const steerQueuedMessageFromShortcut = useEffectEvent((id: string) => {
-    onSteerQueuedMessage(id);
-  });
-
   const getShortcutContext = useCallback(
     (eventTarget: EventTarget | null = document.activeElement) => ({
       terminalFocus: getTerminalFocusOwner() !== null,
@@ -6914,7 +6905,7 @@ export default function ChatView(props: ChatViewProps) {
         if (!message) return;
         event.preventDefault();
         event.stopPropagation();
-        if (!event.repeat) steerQueuedMessageFromShortcut(message.id);
+        if (!event.repeat) queuedMessageActionsRef.current.steer(message.id);
         return;
       }
 
@@ -7228,11 +7219,23 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
 
-  const [queueInteractionThreadKey, setQueueInteractionThreadKey] = useState<string | null>(null);
-  useEffect(() => {
-    setQueueInteractionThreadKey(null);
-  }, [activeThreadKey]);
   const queuedMessages = useQueuedMessages(activeThreadKey ?? "");
+  // The composer's model and modes, as a queued message keeps them for its send.
+  const readComposerSendSettings = (
+    sendCtx: ReturnType<ChatComposerHandle["getSendContext"]>,
+  ): QueuedMessageSendSettings => ({
+    modelSelection: sendCtx.selectedModelSelection,
+    runtimeMode,
+    interactionMode: sendCtx.interactionMode,
+    promptEffort: resolvePromptInjectedEffort(
+      getProviderModelCapabilities(
+        sendCtx.selectedProviderModels,
+        sendCtx.selectedModel,
+        sendCtx.selectedProvider,
+      ),
+      sendCtx.selectedPromptEffort,
+    ),
+  });
   const queuePaused = useQueuedMessageStore(
     (state) => state.pausedByThreadKey[activeThreadKey ?? ""] ?? false,
   );
@@ -7244,8 +7247,6 @@ export default function ChatView(props: ChatViewProps) {
       annotation: PreviewAnnotationPayload;
       image: ComposerImageAttachment | null;
     },
-    /** A queued message being sent now instead of the live composer draft. */
-    queuedMessage?: QueuedComposerMessage,
     actionPrompt?: string,
   ) => {
     e?.preventDefault();
@@ -7255,7 +7256,6 @@ export default function ChatView(props: ChatViewProps) {
       usageLimitsOffered &&
       usageLimitsKey !== null &&
       !directAnnotation &&
-      !queuedMessage &&
       actionPrompt === undefined &&
       !composerHasNonPromptContent &&
       isUsageLimitsCommand(promptRef.current)
@@ -7329,9 +7329,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (activePendingProgress) {
-      // A queued message waits until the question is answered; it must not
-      // be submitted as the answer.
-      if (directAnnotation || queuedMessage || actionPrompt !== undefined) {
+      if (directAnnotation || actionPrompt !== undefined) {
         notifyUnavailableDirectSend();
         return;
       }
@@ -7343,7 +7341,7 @@ export default function ChatView(props: ChatViewProps) {
       notifyUnavailableDirectSend();
       return;
     }
-    const multipleModelSelections = queuedMessage ? null : sendCtx.multipleModelSelections;
+    const multipleModelSelections = sendCtx.multipleModelSelections;
     if (
       multipleModelSelections !== null &&
       serverConfig?.environment.capabilities.requiredWorktreeBootstrap !== true
@@ -7374,8 +7372,7 @@ export default function ChatView(props: ChatViewProps) {
       terminalContexts: composerTerminalContexts,
       previewAnnotations: sendContextPreviewAnnotations,
       reviewComments: composerReviewComments,
-    } = queuedMessage ??
-    (actionPrompt === undefined
+    } = actionPrompt === undefined
       ? sendCtx
       : {
           images: [],
@@ -7383,7 +7380,7 @@ export default function ChatView(props: ChatViewProps) {
           terminalContexts: [],
           previewAnnotations: [],
           reviewComments: [],
-        });
+        };
     const {
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
@@ -7427,14 +7424,13 @@ export default function ChatView(props: ChatViewProps) {
         : sendContextPreviewAnnotations;
     // A direct "send annotation" writes the draft and sends in the same tick; the reference
     // must be in the text now, not after the next render.
-    const promptForSend = queuedMessage
-      ? queuedMessage.prompt
-      : (actionPrompt ??
-        (directAnnotation
-          ? ensureInlineContextReferences(promptRef.current, [
-              previewAnnotationContextReference(directAnnotation.annotation),
-            ])
-          : promptRef.current));
+    const promptForSend =
+      actionPrompt ??
+      (directAnnotation
+        ? ensureInlineContextReferences(promptRef.current, [
+            previewAnnotationContextReference(directAnnotation.annotation),
+          ])
+        : promptRef.current);
     const {
       trimmedPrompt: trimmed,
       sendableTerminalContexts: sendableComposerTerminalContexts,
@@ -7456,7 +7452,7 @@ export default function ChatView(props: ChatViewProps) {
       composerReviewComments.length === 0
         ? parseCodexFeedbackCommand(trimmed)
         : null;
-    if (feedbackCommand && !queuedMessage && multipleModelSelections === null) {
+    if (feedbackCommand && multipleModelSelections === null) {
       if (!isServerThread || activeThread.session === null) {
         toastManager.add(
           stackedThreadToast({
@@ -7507,7 +7503,6 @@ export default function ChatView(props: ChatViewProps) {
     }
     if (
       !directAnnotation &&
-      !queuedMessage &&
       actionPrompt === undefined &&
       sendInteractionModeEnabled &&
       showPlanFollowUpPrompt &&
@@ -7581,7 +7576,7 @@ export default function ChatView(props: ChatViewProps) {
       composerReviewComments.length === 0
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
-    if (standaloneSlashCommand && !queuedMessage && multipleModelSelections === null) {
+    if (standaloneSlashCommand && multipleModelSelections === null) {
       handleInteractionModeChange(standaloneSlashCommand);
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
@@ -7602,12 +7597,6 @@ export default function ChatView(props: ChatViewProps) {
           }),
         );
       }
-      // A queued message whose only content expired would retry on every
-      // boundary and block the rest of the queue. Nothing sendable is left
-      // in it, so drop it and let the queue move on.
-      if (queuedMessage && activeThreadKey) {
-        useQueuedMessageStore.getState().remove(activeThreadKey, queuedMessage.id);
-      }
       return;
     }
     if (!activeProject) {
@@ -7620,9 +7609,9 @@ export default function ChatView(props: ChatViewProps) {
       );
       return;
     }
-    // A paused queue retains new follow-ups regardless of the steering preference.
+    // New messages line up behind queued ones instead of overtaking them, and
+    // a paused queue retains them regardless of the steering preference.
     if (
-      !queuedMessage &&
       !directAnnotation &&
       activeThreadKey &&
       shouldQueueFollowUp({
@@ -7633,7 +7622,12 @@ export default function ChatView(props: ChatViewProps) {
         submissionIntent,
       })
     ) {
-      if (composerRef.current?.validateProviderInput(promptForSend) === false) {
+      const sendSettings = readComposerSendSettings(sendCtx);
+      if (
+        composerRef.current?.validateProviderInput(
+          applyClaudePromptEffortPrefix(promptForSend, sendSettings.promptEffort),
+        ) === false
+      ) {
         return;
       }
       useQueuedMessageStore.getState().enqueue(activeThreadKey, {
@@ -7643,7 +7637,7 @@ export default function ChatView(props: ChatViewProps) {
         terminalContexts: [...composerTerminalContexts],
         previewAnnotations: [...composerPreviewAnnotations],
         reviewComments: [...composerReviewComments],
-        submissionIntent,
+        sendSettings,
         createdAt: new Date().toISOString(),
       });
       if (actionPrompt === undefined) {
@@ -7714,11 +7708,6 @@ export default function ChatView(props: ChatViewProps) {
       text: messageTextForSend || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
     });
     if (composerRef.current?.validateProviderInput(outgoingMessageText) === false) {
-      // A queued message that no longer fits is held at the head for the
-      // user to edit, instead of failing on every render.
-      if (queuedMessage && activeThreadKey) {
-        useQueuedMessageStore.getState().holdAtFront(activeThreadKey, queuedMessage);
-      }
       return;
     }
 
@@ -7785,42 +7774,10 @@ export default function ChatView(props: ChatViewProps) {
 
     sendInFlightRef.current = true;
     const sendGeneration = ++composerSendGenerationRef.current;
-    // Every early return above leaves a queued message in the queue for a
-    // later retry. From here on a failure returns it to the paused queue.
-    if (queuedMessage) {
-      const taken = activeThreadKey
-        ? useQueuedMessageStore
-            .getState()
-            .take(
-              activeThreadKey,
-              queuedMessage.id,
-              phase === "running" ? null : activeThread.latestTurn?.completedAt,
-            )
-        : null;
-      if (!taken) {
-        sendInFlightRef.current = false;
-        return;
-      }
-    }
-    const pauseGenerationAtTake = activeThreadKey
-      ? (useQueuedMessageStore.getState().pauseGenerationByThreadKey[activeThreadKey] ?? 0)
-      : 0;
-    const queuedSendWasPaused = () =>
-      queuedMessage &&
-      activeThreadKey &&
-      (useQueuedMessageStore.getState().pauseGenerationByThreadKey[activeThreadKey] ?? 0) !==
-        pauseGenerationAtTake;
-    // Upload failures and Stop return the message to the paused queue.
-    const abortQueuedReplay = () => {
-      if (queuedMessage && activeThreadKey) {
-        useQueuedMessageStore.getState().holdAtFront(activeThreadKey, queuedMessage);
-      }
-    };
     const attachmentCapabilitiesBeforeUpload = readLiveAttachmentCapabilities();
     if (attachmentCapabilitiesBeforeUpload.fileBlockReason !== null) {
       sendInFlightRef.current = false;
       setThreadError(threadIdForSend, attachmentCapabilitiesBeforeUpload.fileBlockReason);
-      abortQueuedReplay();
       return;
     }
     const turnUsesAttachmentUploads =
@@ -7840,21 +7797,13 @@ export default function ChatView(props: ChatViewProps) {
       if (attachmentCapabilitiesAfterUpload.fileBlockReason !== null) {
         sendInFlightRef.current = false;
         setThreadError(threadIdForSend, attachmentCapabilitiesAfterUpload.fileBlockReason);
-        abortQueuedReplay();
         return;
       }
       if (getUploadedAttachments({ environmentId, images: composerAttachmentsSnapshot }) === null) {
         sendInFlightRef.current = false;
         setThreadError(threadIdForSend, "Retry or remove failed uploads before sending.");
-        abortQueuedReplay();
         return;
       }
-    }
-
-    if (queuedSendWasPaused()) {
-      sendInFlightRef.current = false;
-      abortQueuedReplay();
-      return;
     }
 
     const resolvedSubmissionIntent =
@@ -7897,7 +7846,6 @@ export default function ChatView(props: ChatViewProps) {
       setDockedDraftHeroThreadKey((currentThreadKey) =>
         currentThreadKey === activeThreadKey ? null : currentThreadKey,
       );
-      abortQueuedReplay();
       return;
     }
     beginLocalDispatch({
@@ -8259,7 +8207,7 @@ export default function ChatView(props: ChatViewProps) {
         }),
       );
     }
-    if (!queuedMessage && actionPrompt === undefined) {
+    if (actionPrompt === undefined) {
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
@@ -8336,16 +8284,6 @@ export default function ChatView(props: ChatViewProps) {
     });
     if (failure === null && turnAttachmentsResult._tag === "Failure") {
       failure = turnAttachmentsResult;
-    }
-
-    if (queuedSendWasPaused()) {
-      setOptimisticUserMessages((existing) =>
-        existing.filter((message) => message.id !== messageIdForSend),
-      );
-      abortQueuedReplay();
-      sendInFlightRef.current = false;
-      resetLocalDispatch();
-      return;
     }
 
     let turnStartSucceeded = false;
@@ -8513,24 +8451,7 @@ export default function ChatView(props: ChatViewProps) {
         );
         clearBackgroundDraftSubmissionByRef(scopeThreadRef(environmentId, threadIdForSend));
       }
-      if (queuedMessage) {
-        setOptimisticUserMessages((existing) => {
-          const removed = existing.filter((message) => message.id === messageIdForSend);
-          for (const message of removed) {
-            revokeUserMessagePreviewUrls(message);
-          }
-          const next = existing.filter((message) => message.id !== messageIdForSend);
-          return next.length === existing.length ? existing : next;
-        });
-        // The optimistic row's preview URLs were just revoked, so the images
-        // need fresh ones before the row can show them again.
-        if (activeThreadKey) {
-          useQueuedMessageStore.getState().holdAtFront(activeThreadKey, {
-            ...queuedMessage,
-            images: queuedMessage.images.map(cloneComposerImageForRetry),
-          });
-        }
-      } else if (
+      if (
         actionPrompt === undefined &&
         (backgroundDraftOpened
           ? !composerDraftHasUserContent(
@@ -8621,54 +8542,32 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
 
-  const sendQueuedMessage = useEffectEvent((message: QueuedComposerMessage) => {
-    void onSend(undefined, message.submissionIntent, undefined, message);
-  });
-  const nextQueuedMessage = queuedMessages[0] ?? null;
-  // Approvals and questions block the agent; a steer landing on top of them
-  // would answer nothing and confuse the turn, so the queue holds until the
-  // user resolves them.
+  // Queued messages go out from QueuedMessageSender, which also covers
+  // threads that are not on screen. Send now uses the same path but skips the
+  // wait for the turn to end. Approvals and questions still hold it: a steer
+  // on top of them would answer nothing and confuse the turn.
   const queueBlockedByPendingRequest =
     activePendingApproval !== null || pendingUserInputs.length > 0;
-  // onSend bails early on transient gates (environment offline, settings not
-  // hydrated, checkpoint rewinding, messages loading, machine not chosen) and
-  // leaves the message queued. Re-run when any of them clear so a due message
-  // does not wait for an unrelated phase change.
-  const queueSendGate =
-    queueInteractionThreadKey === activeThreadKey ||
-    activeEnvironmentUnavailable ||
-    !clientSettingsHydrated ||
-    isRevertingCheckpoint ||
-    threadDetailLoading ||
-    needsLoadBalancing ||
-    activeProviderStatus === null;
-  useEffect(() => {
-    if (!nextQueuedMessage || isSendBusy || queueBlockedByPendingRequest || queueSendGate) return;
-    if (sendInFlightRef.current) return;
-    if (!isQueuedMessageDue({ paused: queuePaused, phase })) return;
-    sendQueuedMessage(nextQueuedMessage);
-  }, [
-    isSendBusy,
-    queuePaused,
-    nextQueuedMessage,
-    phase,
-    queueBlockedByPendingRequest,
-    queueSendGate,
-  ]);
+  const queueSendDisabled =
+    queueBlockedByPendingRequest || queuedMessages.some((message) => message.sending);
 
-  const onSteerQueuedMessage = (id: string) => {
-    const message = queuedMessages.find((entry) => entry.id === id);
-    if (
-      !message ||
-      sendInFlightRef.current ||
-      isSendBusy ||
-      isConnecting ||
-      queueBlockedByPendingRequest ||
-      queueSendGate
-    )
-      return;
-    void onSend(undefined, message.submissionIntent, undefined, message);
+  // Read from a ref at call-time so the keybinding handler stays stable.
+  const queuedMessageActionsRef = useRef({ steer: (_id: string) => {} });
+  queuedMessageActionsRef.current = {
+    steer: (id) => {
+      if (!activeThreadRef || queueBlockedByPendingRequest) return;
+      void sendQueuedMessage(activeThreadRef, id);
+    },
   };
+  const onSteerQueuedMessage = useCallback((id: string) => {
+    queuedMessageActionsRef.current.steer(id);
+  }, []);
+  const onQueueInteractionChange = useCallback(
+    (active: boolean) => {
+      if (activeThreadKey) useQueuedMessageStore.getState().setInteracting(activeThreadKey, active);
+    },
+    [activeThreadKey],
+  );
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
@@ -9993,7 +9892,7 @@ export default function ChatView(props: ChatViewProps) {
               >
                 <div
                   data-chat-composer-stack="true"
-                  className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-3xl"
+                  className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-max-width)"
                 >
                   {isDraftHeroState ? (
                     <div className="absolute inset-x-0 bottom-full z-0">
@@ -10030,16 +9929,9 @@ export default function ChatView(props: ChatViewProps) {
                           threadKey={activeThreadKey}
                           messages={queuedMessages}
                           paused={queuePaused}
-                          sendDisabled={
-                            isSendBusy ||
-                            queueBlockedByPendingRequest ||
-                            queueSendGate ||
-                            isConnecting
-                          }
+                          sendDisabled={queueSendDisabled}
                           onSendNow={onSteerQueuedMessage}
-                          onInteractionChange={(active) =>
-                            setQueueInteractionThreadKey(active ? activeThreadKey : null)
-                          }
+                          onInteractionChange={onQueueInteractionChange}
                         />
                       ) : null}
                       <ComposerSurface.Host>
@@ -10197,9 +10089,7 @@ export default function ChatView(props: ChatViewProps) {
                                 onEnvModeChange={onEnvModeChange}
                                 startFromOrigin={startFromOrigin}
                                 onStartFromOriginChange={onStartFromOriginChange}
-                                {...(canOverrideServerThreadEnvMode
-                                  ? { effectiveEnvModeOverride: envMode }
-                                  : {})}
+                                envMode={envMode}
                                 {...(canOverrideServerThreadEnvMode
                                   ? {
                                       activeThreadBranchOverride: activeThreadBranch,

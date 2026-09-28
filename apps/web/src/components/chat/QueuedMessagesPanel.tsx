@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
   closestCenter,
   DndContext,
@@ -58,6 +58,8 @@ export function QueuedMessagesPanel({
   const reorder = useQueuedMessageStore((state) => state.reorder);
   const remove = useQueuedMessageStore((state) => state.remove);
   const updatePrompt = useQueuedMessageStore((state) => state.updatePrompt);
+  // Unmounting mid-drag or mid-edit must not hold the queue.
+  useEffect(() => () => onInteractionChange(false), [onInteractionChange]);
   const nextMessage = messages[0];
   const collapsedPreview =
     nextMessage?.prompt.trim() ||
@@ -194,6 +196,8 @@ function QueuedMessageRow({
   onFinishEdit: (prompt: string | null) => void;
 }) {
   const [prompt, setPrompt] = useState(message.prompt);
+  // A message on its way out can no longer be changed.
+  const sending = message.sending !== undefined;
   const {
     attributes,
     listeners,
@@ -202,7 +206,7 @@ function QueuedMessageRow({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: message.id, disabled: dragDisabled });
+  } = useSortable({ id: message.id, disabled: dragDisabled || sending });
   const attachmentCount = message.images.length + message.files.length;
   const contextCount =
     message.terminalContexts.length +
@@ -226,7 +230,7 @@ function QueuedMessageRow({
         {...listeners}
         aria-label="Drag to reorder message"
         className="mt-0.5 touch-none rounded p-1 text-muted-foreground/50 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring disabled:invisible pointer-fine:opacity-0 pointer-fine:group-hover/queue-row:opacity-100 pointer-fine:group-focus-within/queue-row:opacity-100"
-        disabled={dragDisabled}
+        disabled={dragDisabled || sending}
       >
         <GripVerticalIcon className="size-3.5" />
       </button>
@@ -288,7 +292,7 @@ function QueuedMessageRow({
                   variant="ghost"
                   className="rounded-md pointer-fine:opacity-0 pointer-fine:group-hover/queue-row:opacity-100 pointer-fine:group-focus-within/queue-row:opacity-100"
                   aria-label="Edit queued message"
-                  disabled={editDisabled}
+                  disabled={editDisabled || sending}
                   onClick={() => {
                     setPrompt(message.prompt);
                     onEdit();
@@ -309,6 +313,7 @@ function QueuedMessageRow({
                   variant="ghost"
                   className="rounded-md hover:bg-destructive/10 hover:text-destructive hover:[--control-icon-color:var(--destructive)] pointer-fine:opacity-0 pointer-fine:group-hover/queue-row:opacity-100 pointer-fine:group-focus-within/queue-row:opacity-100"
                   aria-label="Delete queued message"
+                  disabled={sending}
                   onClick={onDelete}
                 />
               }
