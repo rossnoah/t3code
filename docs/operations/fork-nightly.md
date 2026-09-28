@@ -27,8 +27,17 @@ The release job imports changes since the last recorded stack, rebases its
 patches onto the latest published upstream nightly, and checks and packages that
 exact candidate. Only after tests, signing, and notarization pass does it update
 `main` and `fork/stack` together. Concurrent edits to either branch reject that
-promotion; the next run retries from the new state. The update uses the workflow's
-normal GitHub token, so its own push does not trigger another release run.
+promotion; the next run retries from the new state.
+
+GitHub rejects pushes from the workflow's automatic token whenever the update
+changes a file under `.github/workflows/`, which upstream nightlies sometimes do.
+Add a `FORK_PUSH_TOKEN` secret so those promotions succeed: a fine-grained personal
+access token for this repository with **Contents** and **Workflows** read and write
+access. Its push starts another release run, which finds the build already
+published and stops. Without the secret, such an update fails at promotion.
+Prepare it locally as described below, then run
+`node .github/scripts/fork-stack.cjs publish <previous-main-sha> <previous-stack-sha>`
+from the finished worktree to push both branches with your own credentials.
 
 Release tags point to the integrated source commit. Both the automatic source
 archives and `fork-source.tar.gz` contain the build source before release version
@@ -90,7 +99,8 @@ Repository Actions secrets:
 - `APPLE_API_KEY`: the App Store Connect Team API key's `.p8` contents.
 - `APPLE_API_KEY_ID`: the key's ID.
 - `APPLE_API_ISSUER`: the team's Issuer ID.
+- `FORK_PUSH_TOKEN` (optional): see [Patch stack](#patch-stack).
 
 Replace these secrets when rotating credentials. Do not commit credential files.
-The workflow uses GitHub-hosted Apple Silicon runners and the repository's
-automatic token for publishing; it does not need credentials from local Xcode.
+The workflow uses GitHub-hosted Apple Silicon runners and publishes releases with
+the repository's automatic token; it does not need credentials from local Xcode.
