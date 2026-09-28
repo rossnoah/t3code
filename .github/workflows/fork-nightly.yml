@@ -196,9 +196,10 @@ jobs:
           grep -q 'owner: rossnoah' "${apps[0]}/Contents/Resources/app-update.yml"
           grep -q 'repo: t3code' "${apps[0]}/Contents/Resources/app-update.yml"
 
+      # The automatic token cannot push workflow file changes from upstream.
       - name: Promote checked source and patch stack
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.FORK_PUSH_TOKEN || github.token }}
         run: |
           set -euo pipefail
           gh auth setup-git
