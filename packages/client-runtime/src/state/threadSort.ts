@@ -116,20 +116,21 @@ export function getThreadSortTimestamp(
 }
 
 /**
- * Sort anchor for the active thread list: creation time, re-anchored to
- * unsettledAt when the thread last re-entered the active list (an explicit
- * un-settle, or a settled thread waking on activity). The list stays static
- * between lifecycle transitions, but an un-settled thread surfaces at the
- * top instead of sinking back to its creation-order slot. Shared by web and
- * mobile so both render the same order. Malformed timestamps sink to 0.
+ * Sort anchor for the active thread list: the latest of creation, the last
+ * user message, and unsettledAt (an explicit un-settle, or a settled thread
+ * waking on activity). Sending a message lifts a thread to the top; agent
+ * activity alone does not move it. Shared by web and mobile so both render
+ * the same order. Malformed timestamps sink to 0.
  */
 function activeThreadAnchorTimestampMs(thread: {
   readonly createdAt: string;
   readonly unsettledAt?: string | null | undefined;
+  readonly latestUserMessageAt?: string | null | undefined;
 }): number {
   return Math.max(
     toSortableTimestamp(thread.createdAt) ?? 0,
     toSortableTimestamp(thread.unsettledAt ?? undefined) ?? 0,
+    toSortableTimestamp(thread.latestUserMessageAt ?? undefined) ?? 0,
   );
 }
 
@@ -335,13 +336,15 @@ export function sortPinnedThreadsByOrderKey<
   return [...keyed, ...keyless];
 }
 
-/** New and reopened threads lead the active list. Arranged threads follow
-    their saved keys; activity leaves both groups in place. */
+/** Unarranged threads lead the active list, most recently messaged, created
+    or reopened first. Arranged threads follow their saved keys; the server
+    drops a thread's key when it gets a new message. */
 export function sortActiveThreadsByOrderKey<
   T extends {
     readonly id: string;
     readonly createdAt: string;
     readonly unsettledAt?: string | null | undefined;
+    readonly latestUserMessageAt?: string | null | undefined;
     readonly activeOrderKey?: string | null | undefined;
     readonly environmentId?: string | undefined;
   },

@@ -1,5 +1,6 @@
 import {
   CommandId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -196,6 +197,41 @@ it.layer(NodeServices.layer)("active thread ordering", (it) => {
         snoozedUntil: null,
         pinnedAt: null,
       });
+    }),
+  );
+  it.effect("releases an arranged slot when the user sends a message", () =>
+    Effect.gen(function* () {
+      let readModel = makeReadModel({ activeOrderKey: "m" });
+      const decided = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start"),
+          threadId: THREAD_ID,
+          message: {
+            messageId: MessageId.make("message-1"),
+            role: "user",
+            text: "Continue",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: NOW,
+        },
+        readModel,
+      });
+      const events = Array.isArray(decided) ? decided : [decided];
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.meta-updated",
+        "thread.message-sent",
+        "thread.turn-start-requested",
+      ]);
+      for (const event of events) {
+        readModel = yield* projectEvent(readModel, {
+          ...event,
+          sequence: readModel.snapshotSequence + 1,
+        });
+      }
+      expect(readModel.threads[0]?.activeOrderKey).toBeNull();
     }),
   );
 });

@@ -420,6 +420,28 @@ describe("sortActiveThreadsByOrderKey", () => {
     ]);
   });
 
+  it("lifts unarranged threads by their latest user message", () => {
+    const sorted = sortActiveThreadsByOrderKey([
+      { id: "newest-created", createdAt: "2026-03-09T12:00:00.000Z" },
+      {
+        id: "recently-messaged",
+        createdAt: "2026-03-01T09:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T13:00:00.000Z",
+      },
+      {
+        id: "arranged",
+        createdAt: "2026-03-01T08:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T14:00:00.000Z",
+        activeOrderKey: "m",
+      },
+    ]);
+    expect(sorted.map((thread) => thread.id)).toEqual([
+      "recently-messaged",
+      "newest-created",
+      "arranged",
+    ]);
+  });
+
   it("breaks equal order keys and timestamps by thread then environment", () => {
     for (const activeOrderKey of [null, "m"]) {
       const threads = [

@@ -1516,6 +1516,24 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
+      // A new message releases a hand-arranged slot, so the thread rejoins
+      // the activity-ordered top of the active list. Dragging it re-arranges.
+      if (targetThread.activeOrderKey != null) {
+        lifecycleResetEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.meta-updated",
+          payload: {
+            threadId: command.threadId,
+            activeOrderKey: null,
+            updatedAt: targetThread.updatedAt,
+          },
+        });
+      }
       return [
         ...lifecycleResetEvents,
         ...(userMessageEvent ? [userMessageEvent] : []),

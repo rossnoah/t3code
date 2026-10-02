@@ -64,6 +64,8 @@ async function checkFork() {
     "packages/contracts/src/projectScript.test.ts",
     "apps/server/src/project/ProjectSetupScriptRunner.test.ts",
     "scripts/build-desktop-artifact.test.ts",
+    "packages/client-runtime/src/state/threadSort.test.ts",
+    "apps/server/src/orchestration/decider.active-order.test.ts",
   ]);
   await runCheck("vp", [
     "test",
